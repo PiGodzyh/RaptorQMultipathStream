@@ -1,0 +1,20 @@
+# 编译输出
+build/
+
+# 编辑器临时文件
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE 配置
+.vscode/
+.idea/
+*.code-workspace
+
+# 对象文件
+*.o
+*.a
+*.so
+*.dylib
+

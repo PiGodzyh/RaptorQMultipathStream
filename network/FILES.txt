@@ -1,0 +1,149 @@
+╔════════════════════════════════════════════════════════════════╗
+║           Network 模块 - 文件说明                              ║
+╚════════════════════════════════════════════════════════════════╝
+
+📦 src_new/network/ 目录结构
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📁 核心文件
+├── 📄 network_common.h      # 公共定义和数据结构
+├── 📄 network_server.h      # UDP 服务器头文件
+├── 📄 network_server.cpp    # UDP 服务器实现
+├── 📄 network_client.h      # UDP 客户端头文件
+├── 📄 network_client.cpp    # UDP 客户端实现
+└── 📄 Makefile              # 编译配置文件
+
+📁 示例程序
+├── 📄 server_example.cpp    # 服务器示例
+└── 📄 client_example.cpp    # 客户端示例
+
+📁 文档
+├── 📄 README.md             # 完整使用文档
+├── 📄 FILES.txt             # 本文件
+└── 📄 .gitignore            # Git 忽略规则
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🚀 快速开始
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣  安装依赖
+   macOS:   $ brew install libevent
+   Ubuntu:  $ sudo apt-get install libevent-dev
+
+2️⃣  编译
+   $ make
+
+3️⃣  运行服务器（终端1）
+   $ build/server_example 8888
+
+4️⃣  运行客户端（终端2）
+   $ build/client_example 127.0.0.1 8888
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 主要 API
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+namespace Network {
+
+  📡 UDP 服务器
+  class UDPServer {
+      UDPServer(port, bind_addr)       // 构造函数
+      setReceiveCallback(callback)     // 设置接收回调
+      setErrorCallback(callback)       // 设置错误回调
+      start()                          // 启动（阻塞）
+      startAsync()                     // 异步启动
+      stop()                           // 停止
+      sendTo(data, addr, port)         // 发送数据
+      reply(packet)                    // 回复数据包
+  };
+
+  📤 UDP 客户端
+  class UDPClient {
+      UDPClient(bind_port = 0)         // 构造函数
+      sendTo(data, addr, port)         // 发送到指定地址
+      setDefaultTarget(addr, port)     // 设置默认目标
+      send(data)                       // 发送到默认目标
+      setReceiveCallback(callback)     // 设置接收回调
+      startReceiving()                 // 开始接收
+      stopReceiving()                  // 停止接收
+  };
+
+  📦 数据包结构
+  struct Packet {
+      std::vector<uint8_t> data;       // 数据内容
+      std::string remote_addr;         // 远程地址
+      uint16_t remote_port;            // 远程端口
+  };
+
+  🔧 回调类型
+  using ReceiveCallback = std::function<void(const Packet&)>;
+  using ErrorCallback = std::function<void(const std::string&)>;
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 使用示例
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// ========== 服务器 ==========
+#include "network_server.h"
+using namespace Network;
+
+UDPServer server(8888);
+
+server.setReceiveCallback([&server](const Packet& packet) {
+    // 处理接收到的数据
+    std::cout << "收到 " << packet.data.size() << " 字节" << std::endl;
+    
+    // 回复
+    std::vector<uint8_t> reply = {'O', 'K'};
+    Packet reply_packet(reply, packet.remote_addr, packet.remote_port);
+    server.reply(reply_packet);
+});
+
+server.start();  // 阻塞运行
+
+
+// ========== 客户端 ==========
+#include "network_client.h"
+using namespace Network;
+
+UDPClient client;
+client.setDefaultTarget("127.0.0.1", 8888);
+
+// 发送数据
+std::vector<uint8_t> data = {1, 2, 3, 4, 5};
+client.send(data);
+
+// 接收响应（可选）
+client.setReceiveCallback([](const Packet& packet) {
+    std::cout << "收到响应" << std::endl;
+});
+client.startReceiving();
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✨ 特性
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ 基于 libevent 事件驱动
+✅ 异步非阻塞 I/O
+✅ 简洁的 C++ 接口
+✅ 支持回调机制
+✅ 线程安全
+✅ Pimpl 模式隐藏实现
+✅ 详细的文档和示例
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📖 更多信息
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+详细文档：README.md
+服务器示例：server_example.cpp
+客户端示例：client_example.cpp
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
