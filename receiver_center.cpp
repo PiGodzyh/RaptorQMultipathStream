@@ -123,10 +123,7 @@ void ReceiverCenter::processDecodedItem(std::shared_ptr<DecodedItem>& item) {
   
   // 如果是期望的下一个stream_id，直接处理
   if (stream_id == next_expected_stream_id_) {
-    // 回调用户
-    std::cout << "ReceiverCenter: 按序处理流 " << stream_id 
-              << " (大小: " << item->data.size() << " 字节)" << std::endl;
-    
+    // 回调用户（减少输出）
     if (msg_callback_) {
       msg_callback_(item->data);
     }
@@ -137,31 +134,32 @@ void ReceiverCenter::processDecodedItem(std::shared_ptr<DecodedItem>& item) {
     HandlePendingItems();
   } else if (stream_id > next_expected_stream_id_) {
     // 如果stream_id比期望的大，说明乱序到达，放入最小堆
-    std::cout << "ReceiverCenter: 流 " << stream_id << " 乱序到达"
-              << " (期望: " << next_expected_stream_id_ 
-              << ", 缓存大小: " << pending_items_.size() + 1 << ")" << std::endl;
-    
     pending_items_.push(item);
+    
+    // 每100个乱序包打印一次
+    if (pending_items_.size() % 100 == 0) {
+      std::cout << "ReceiverCenter: 乱序缓存=" << pending_items_.size() 
+                << ", 期望=" << next_expected_stream_id_ << std::endl;
+    }
     
     if (pending_items_.size() >= max_priority_queue_size_) {
       const auto& pending_item = pending_items_.top();
-      std::cout << "ReceiverCenter: 缓存满， " << next_expected_stream_id_ << " to " << pending_item->stream_id << "丢包 " << std::endl;
+      std::cout << "ReceiverCenter: 缓存满，跳过 " << next_expected_stream_id_ 
+                << " 到 " << pending_item->stream_id 
+                << " (丢失 " << (pending_item->stream_id - next_expected_stream_id_) << " 个流)" << std::endl;
       next_expected_stream_id_ = pending_item->stream_id;
       HandlePendingItems();
     }
   } else {
     // stream_id < next_expected_stream_id_，说明是重复或过时的包，丢弃
-    std::cout << "ReceiverCenter: 丢弃过时的流 " << stream_id 
-              << " (期望: " << next_expected_stream_id_ << ")" << std::endl;
+    // 不打印，避免输出过多
   }
 }
 
 void ReceiverCenter::HandlePendingItems() {
+  uint32_t processed = 0;
   while (!pending_items_.empty() && pending_items_.top()->stream_id == next_expected_stream_id_) {
     const auto& pending_item = pending_items_.top();
-    
-    std::cout << "ReceiverCenter: 从缓存处理流 " << pending_item->stream_id 
-              << " (大小: " << pending_item->data.size() << " 字节)" << std::endl;
     
     if (msg_callback_) {
       msg_callback_(pending_item->data);
@@ -169,13 +167,12 @@ void ReceiverCenter::HandlePendingItems() {
     
     next_expected_stream_id_++;
     pending_items_.pop();
+    processed++;
   }
   
-  // 打印缓存状态
-  if (!pending_items_.empty()) {
-    std::cout << "ReceiverCenter: 缓存中还有 " << pending_items_.size() 
-              << " 个数据包，最小stream_id: " << pending_items_.top()->stream_id 
-              << ", 期望: " << next_expected_stream_id_ << std::endl;
+  // 只在处理了缓存中的包时打印
+  if (processed > 0 && processed > 10) {
+    std::cout << "ReceiverCenter: 从缓存处理了 " << processed << " 个包" << std::endl;
   }
 }
 

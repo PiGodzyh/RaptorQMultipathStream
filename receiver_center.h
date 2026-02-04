@@ -44,8 +44,8 @@ class ReceiverCenter : private Receiver::Visitor {
   // 用户回调类型
   using MsgCallback = std::function<void(const std::vector<uint8_t>& data)>;
   
-  static const size_t kDefaultQueueSize = 1000;
-  static const uint32_t kDefaultMaxPriorityQueueSize = 20;
+  static const size_t kDefaultQueueSize = 10000;  // 增大队列
+  static const uint32_t kDefaultMaxPriorityQueueSize = 500;  // 增大乱序缓存
   
  public:
   /**
