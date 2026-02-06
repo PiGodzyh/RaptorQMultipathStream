@@ -7,15 +7,13 @@ CXXFLAGS = -std=c++14 -Wall -O2 -fPIC
 # 目录设置
 BUILD_DIR = build
 
-# 检测 libevent 路径（支持 brew 安装）
-LIBEVENT_PREFIX := $(shell brew --prefix libevent 2>/dev/null || echo "/usr/local")
+# 自动检测 libevent 路径
+LIBEVENT_CFLAGS := $(shell pkg-config --cflags libevent 2>/dev/null || echo "-I/usr/include")
+LIBEVENT_LIBS := $(shell pkg-config --libs libevent 2>/dev/null || echo "-levent -levent_core -levent_pthreads")
 
-# 包含路径
-INCLUDES = -I. -I$(LIBEVENT_PREFIX)/include
-
-# 库路径和链接库
-LDFLAGS = -L$(LIBEVENT_PREFIX)/lib
-LIBS = -levent -lpthread
+INCLUDES += $(LIBEVENT_CFLAGS)
+LDFLAGS  += $(shell pkg-config --libs --libs-only-L libevent 2>/dev/null || echo "-L/usr/lib")
+LIBS    += $(LIBEVENT_LIBS) -lpthread
 
 # 目标文件
 LIB_TARGET = $(BUILD_DIR)/libnetwork.a
@@ -119,12 +117,6 @@ help:
 .PHONY: check-deps
 check-deps:
 	@echo "✓ 检查依赖"
-	@command -v $(CXX) >/dev/null 2>&1 || \
-		(echo "错误: 找不到 g++ 编译器" && exit 1)
-	@if [ ! -d "$(LIBEVENT_PREFIX)/include/event2" ]; then \
-		echo "错误: 找不到 libevent 头文件"; \
-		echo "请安装 libevent: brew install libevent"; \
-		exit 1; \
-	fi
-	@echo "✓ libevent 路径: $(LIBEVENT_PREFIX)"
-
+	@command -v $(CXX) >/dev/null 2>&1 || { echo "错误: 未找到 g++"; exit 1; }
+	@pkg-config --exists libevent || { echo "错误: 找不到 libevent 头文件\n请安装 libevent: sudo apt install libevent-dev"; exit 1; }
+	@echo "✓ 依赖检查通过"

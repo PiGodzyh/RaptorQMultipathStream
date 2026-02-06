@@ -1,2 +1,4 @@
 libRaptorQ
 build
+.vscode
+*.o

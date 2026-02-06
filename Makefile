@@ -10,10 +10,12 @@ LDFLAGS = -L./libRaptorQ/build/lib
 LIBS = -lRaptorQ -lpthread
 
 # 自动检测 libevent 路径
-LIBEVENT_PREFIX := $(shell brew --prefix libevent 2>/dev/null || echo "/usr/local")
-INCLUDES += -I$(LIBEVENT_PREFIX)/include
-LDFLAGS += -L$(LIBEVENT_PREFIX)/lib
-LIBS += -levent -levent_core
+LIBEVENT_CFLAGS := $(shell pkg-config --cflags libevent 2>/dev/null || echo "-I/usr/include")
+LIBEVENT_LIBS := $(shell pkg-config --libs libevent 2>/dev/null || echo "-levent -levent_core -levent_pthreads")
+
+INCLUDES += $(LIBEVENT_CFLAGS)
+LDFLAGS  += $(shell pkg-config --libs --libs-only-L libevent 2>/dev/null || echo "-L/usr/lib")
+LIBS    += $(LIBEVENT_LIBS)
 
 # 构建目录
 BUILD_DIR = build
@@ -91,7 +93,7 @@ $(BUILD_DIR)/receiver_demo.o: receiver_demo.cpp receiver_center.h
 check-deps:
 	@echo "检查依赖..."
 	@command -v $(CXX) >/dev/null 2>&1 || { echo "错误: 未找到 g++"; exit 1; }
-	@test -d $(LIBEVENT_PREFIX)/include || { echo "错误: 未找到 libevent (尝试: brew install libevent)"; exit 1; }
+	@pkg-config --exists libevent || { echo "错误: 未找到 libevent (请安装: sudo apt install libevent-dev)"; exit 1; }
 	@echo "✓ 依赖检查通过"
 	@echo ""
 	@echo "构建子模块..."
