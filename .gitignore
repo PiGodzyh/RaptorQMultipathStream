@@ -2,3 +2,5 @@ libRaptorQ
 build
 .vscode
 *.o
+data
+output
