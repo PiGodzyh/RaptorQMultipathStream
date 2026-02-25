@@ -2,6 +2,7 @@
 #include "common.h"
 #include <iostream>
 #include <cstring>
+#include <mutex>
 
 Sender::Sender(const std::string& server_addr, uint16_t server_port, 
                uint16_t symbol_size, uint32_t encode_thread_count)
@@ -14,7 +15,10 @@ Sender::Sender(const std::string& server_addr, uint16_t server_port,
     running_(false),
     sent_count_(0),
     sent_symbol_count_(0),
-    failed_count_(0) {
+    failed_count_(0),
+    send_interval_us_(0),  // 默认无发送间隔限制
+    queue_size_(kDefaultQueueSize),
+    last_send_time_(std::chrono::steady_clock::now()) {
   // 设置客户端的默认目标地址
   client_.setDefaultTarget(server_addr_, server_port_);
   
@@ -126,6 +130,35 @@ void Sender::setRepairRatio(float ratio) {
   }
 }
 
+void Sender::setSendInterval(uint32_t interval_us) {
+  send_interval_us_ = interval_us;
+  std::cout << "Sender: 发送间隔设置为 " << interval_us << " us" << std::endl;
+}
+
+void Sender::setQueueSize(size_t size) {
+  queue_size_ = size;
+  std::cout << "Sender: 队列大小设置为 " << size << std::endl;
+}
+
+double Sender::getCurrentSendRate() const {
+  std::lock_guard<std::mutex> lock(stat_mutex_);
+  
+  auto now = std::chrono::steady_clock::now();
+  // 清理1秒前的记录
+  size_t valid_count = 0;
+  for (auto it = send_times_.begin(); it != send_times_.end(); ) {
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - *it).count();
+    if (elapsed > 1000) {
+      it = send_times_.erase(it);
+    } else {
+      ++it;
+      ++valid_count;
+    }
+  }
+  
+  return valid_count;  // 过去1秒内的发送次数
+}
+
 size_t Sender::getQueueSize() const {
   size_t total = 0;
   for (const auto& queue : event_queues_) {
@@ -165,7 +198,7 @@ void Sender::encodeLoopThread(uint32_t thread_id) {
           failed_count_++;
         }
       },
-      kDefaultQueueSize
+      queue_size_
     );
     
     std::cout << "Sender: 编码线程 " << thread_id << " 队列已创建" << std::endl;
@@ -252,20 +285,42 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
                 symbol.data.data(), 
                 symbol.data.size());
     
+    // 发送间隔控制
+    if (send_interval_us_ > 0) {
+      std::lock_guard<std::mutex> lock(send_time_mutex_);
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_send_time_).count();
+      if (elapsed < send_interval_us_) {
+        std::this_thread::sleep_for(std::chrono::microseconds(send_interval_us_ - elapsed));
+      }
+    }
+    
     // 发送
     ssize_t sent = client_.send(packet_data);
     
     if (sent > 0) {
       sent_count++;
       sent_symbol_count_++;
+      // 记录发送时间
+      {
+        std::lock_guard<std::mutex> lock(stat_mutex_);
+        send_times_.push_back(std::chrono::steady_clock::now());
+        // 限制统计队列大小
+        if (send_times_.size() > 10000) {
+          send_times_.erase(send_times_.begin());
+        }
+      }
     } else {
       failed_count++;
       this->failed_count_++;
       std::cerr << "[编码线程 " << thread_id << "] 发送符号 " << symbol.id << " 失败" << std::endl;
     }
     
-    // 可选：添加小延时避免网络拥塞
-    // std::this_thread::sleep_for(std::chrono::microseconds(100));
+    // 更新最后发送时间
+    if (send_interval_us_ > 0) {
+      std::lock_guard<std::mutex> lock(send_time_mutex_);
+      last_send_time_ = std::chrono::steady_clock::now();
+    }
   }
   
   // 6. 统计

@@ -5,6 +5,7 @@
 #include <memory>
 #include <atomic>
 #include <string>
+#include <chrono>
 
 #include "network/network_client.h"
 #include "event_base/event_queue.h"
@@ -60,6 +61,24 @@ class Sender {
    * @param ratio 修复符号占源符号的比例（0.0 - 1.0），默认 0.1 (10%)
    */
   void setRepairRatio(float ratio);
+  
+  /**
+   * 设置发送间隔（微秒）
+   * 用于控制发包速率，0 表示无限制
+   * @param interval_us 发送间隔（微秒）
+   */
+  void setSendInterval(uint32_t interval_us);
+  
+  /**
+   * 设置编码队列大小
+   * @param size 队列大小
+   */
+  void setQueueSize(size_t size);
+  
+  /**
+   * 获取当前发送速率（pkt/s）
+   */
+  double getCurrentSendRate() const;
   
   /**
    * 获取已发送的数据包总数（原始数据包，非符号）
@@ -143,4 +162,14 @@ class Sender {
   std::atomic<uint64_t> sent_count_;         // 发送的数据包数
   std::atomic<uint64_t> sent_symbol_count_;  // 发送的符号数
   std::atomic<uint64_t> failed_count_;       // 发送失败的符号数
+  
+  // 新增可配置参数
+  uint32_t send_interval_us_;                // 发送间隔（微秒）
+  size_t queue_size_;                        // 队列大小
+  
+  // 发送速率统计
+  mutable std::mutex stat_mutex_;
+  mutable std::vector<std::chrono::steady_clock::time_point> send_times_;
+  std::chrono::steady_clock::time_point last_send_time_;
+  mutable std::mutex send_time_mutex_;
 };
