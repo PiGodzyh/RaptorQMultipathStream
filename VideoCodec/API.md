@@ -7,6 +7,11 @@ VideoCodec 模块提供基于 FFmpeg 的视频编解码功能，支持 MP4 格�
 - **VideoEncoder**: 视频读取器，从 MP4 文件解码并提取帧
 - **VideoDecoder**: 视频写入器，将帧编码为 MP4 文件
 
+## 依赖
+
+- FFmpeg 开发库（至少包含 `libavformat`、`libavcodec`、`libavutil`、`libswscale`）
+- 已在 FFmpeg 4.x 环境下测试（使用新版 API，无需 `av_register_all()`）
+
 ## 数据结构
 
 ### VideoFrame - 视频帧
