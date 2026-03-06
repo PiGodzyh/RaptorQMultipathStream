@@ -56,12 +56,7 @@ bool VideoEncoder::Open(const std::string& filepath) {
         Close();
     }
 
-    // 注册所有格式和解码器
-    static bool registered = false;
-    if (!registered) {
-        av_register_all();
-        registered = true;
-    }
+    // FFmpeg 4.0+ 无需 av_register_all()，格式与解码器会自动注册
 
     last_error_ = ErrorCode::SUCCESS;
 
@@ -274,7 +269,7 @@ bool VideoEncoder::ReadFrame(VideoFrame& frame) {
         frame.height = av_frame_->height;
         frame.pts = av_frame_->pts;
         frame.dts = av_frame_->pkt_dts;
-        frame.is_key_frame = av_frame_->key_frame;
+        frame.is_key_frame = (av_frame_->flags & AV_FRAME_FLAG_KEY) != 0;
         
         for (int i = 0; i < 4; i++) {
             frame.data[i] = av_frame_->data[i];
@@ -377,7 +372,7 @@ bool VideoEncoder::ConvertFrame(AVFrame* src_frame, VideoFrame& dst_frame) {
     dst_frame.height = rgb_frame_->height;
     dst_frame.pts = src_frame->pts;
     dst_frame.dts = src_frame->pkt_dts;
-    dst_frame.is_key_frame = src_frame->key_frame;
+    dst_frame.is_key_frame = (src_frame->flags & AV_FRAME_FLAG_KEY) != 0;
     
     for (int i = 0; i < 4; i++) {
         dst_frame.data[i] = rgb_frame_->data[i];

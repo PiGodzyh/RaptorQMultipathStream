@@ -4,7 +4,8 @@
 CXX = g++
 CXXFLAGS = -std=c++14 -Wall -O2 -fPIC
 INCLUDES = -I. -I./pack -I./network -I./event_base -I./libRaptorQ/src
-LDFLAGS = -L./libRaptorQ/build/lib
+# -rpath 让运行时从项目内找到 libRaptorQ，无需设置 LD_LIBRARY_PATH
+LDFLAGS = -L./libRaptorQ/build/lib -Wl,-rpath,'$$ORIGIN/../libRaptorQ/build/lib'
 
 # 库
 LIBS = -lRaptorQ -lpthread

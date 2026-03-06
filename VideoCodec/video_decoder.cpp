@@ -42,11 +42,7 @@ bool VideoDecoder::Create(const std::string& filepath, const EncodeParams& param
     }
 
     // 注册所有格式和编码器
-    static bool registered = false;
-    if (!registered) {
-        av_register_all();
-        registered = true;
-    }
+    // FFmpeg 4.0+ 无需 av_register_all()，格式与编解码器会自动注册
 
     last_error_ = ErrorCode::SUCCESS;
     encode_params_ = params;
