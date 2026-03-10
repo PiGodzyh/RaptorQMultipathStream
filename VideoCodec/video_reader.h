@@ -1,16 +1,19 @@
 /**
- * VideoEncoder - 视频编码器
- * 从 MP4 文件读取视频并提取帧
+ * video_reader.h - 视频读取器
+ * 
+ * 从MP4等容器文件读取H.264编码数据（NAL单元），不解码为YUV
  * 
  * 使用示例:
- *   VideoEncoder encoder;
- *   if (encoder.Open("input.mp4")) {
- *       VideoInfo info = encoder.GetVideoInfo();
- *       VideoFrame frame;
- *       while (encoder.ReadFrame(frame)) {
- *           // 处理帧
+ *   VideoReader reader;
+ *   if (reader.Open("input.mp4")) {
+ *       VideoInfo info = reader.GetVideoInfo();
+ *       EncodedFrame frame;
+ *       while (reader.ReadFrame(frame)) {
+ *           // frame.data 包含H.264 NAL单元
+ *           // frame.is_key_frame 标识是否为I帧
+ *           // frame.type 标识为I/P/B帧
  *       }
- *       encoder.Close();
+ *       reader.Close();
  *   }
  */
 
@@ -19,30 +22,31 @@
 #include "video_codec.h"
 #include <functional>
 
-// 前向声明 FFmpeg 结构
+// FFmpeg前向声明
 struct AVFormatContext;
 struct AVCodecContext;
-struct AVFrame;
 struct AVPacket;
-struct SwsContext;
+struct AVStream;
 
 namespace VideoCodec {
 
 // 帧读取回调
-using FrameCallback = std::function<bool(const VideoFrame& frame)>;
+using FrameReadCallback = std::function<bool(const EncodedFrame& frame)>;
 
-class VideoEncoder {
+class VideoReader {
 public:
-    VideoEncoder();
-    ~VideoEncoder();
+    VideoReader();
+    ~VideoReader();
 
     // 禁止拷贝，允许移动
-    VideoEncoder(const VideoEncoder&) = delete;
-    VideoEncoder& operator=(const VideoEncoder&) = delete;
+    VideoReader(const VideoReader&) = delete;
+    VideoReader& operator=(const VideoReader&) = delete;
+    VideoReader(VideoReader&&) noexcept;
+    VideoReader& operator=(VideoReader&&) noexcept;
 
     /**
      * 打开视频文件
-     * @param filepath 视频文件路径
+     * @param filepath 视频文件路径（支持MP4等格式）
      * @return 是否成功
      */
     bool Open(const std::string& filepath);
@@ -63,18 +67,18 @@ public:
     VideoInfo GetVideoInfo() const { return video_info_; }
 
     /**
-     * 读取一帧
-     * @param frame 输出帧结构（内部数据由 FFmpeg 管理，不要手动释放）
-     * @return 是否成功读取，false 表示结束或错误
+     * 读取一帧H.264编码数据
+     * @param frame 输出编码帧结构（包含NAL单元数据）
+     * @return 是否成功读取，false表示结束或错误
      */
-    bool ReadFrame(VideoFrame& frame);
+    bool ReadFrame(EncodedFrame& frame);
 
     /**
      * 使用回调读取所有帧
      * @param callback 回调函数，返回 false 停止读取
      * @return 读取的帧数
      */
-    int ReadAllFrames(FrameCallback callback);
+    int ReadAllFrames(FrameReadCallback callback);
 
     /**
      * 跳转到指定时间戳
@@ -98,17 +102,21 @@ public:
      */
     std::string GetLastErrorString() const;
 
+    /**
+     * 获取当前GOP编号
+     */
+    uint32_t GetCurrentGopId() const { return current_gop_id_; }
+
 private:
     bool is_open_;
     ErrorCode last_error_;
     VideoInfo video_info_;
 
-    // FFmpeg 上下文
+    // FFmpeg上下文
     AVFormatContext* fmt_ctx_;
     AVCodecContext* codec_ctx_;
-    AVFrame* av_frame_;
     AVPacket* packet_;
-    SwsContext* sws_ctx_;
+    AVStream* video_stream_;
     
     // 视频流索引
     int video_stream_index_;
@@ -116,14 +124,14 @@ private:
     // 当前时间戳
     int64_t current_pts_;
     
-    // 帧率转换用
-    AVFrame* rgb_frame_;
+    // GOP状态
+    uint32_t current_gop_id_;
+    uint32_t frame_in_gop_;
     
-    // 内部转换
-    bool ConvertFrame(AVFrame* src_frame, VideoFrame& dst_frame);
-    
-    // 初始化转换上下文
-    bool InitSwsContext(int src_width, int src_height, int src_format);
+    // 内部方法
+    bool InitStreams();
+    FrameType DetectFrameType(const uint8_t* data, size_t size, bool is_key_frame);
+    int64_t ConvertPtsToMs(int64_t pts) const;
 };
 
 } // namespace VideoCodec

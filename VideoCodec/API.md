@@ -1,96 +1,98 @@
-# VideoCodec API 说明
+# VideoCodec API 说明 (H.264 NAL Passthrough)
 
 ## 概述
 
-VideoCodec 模块提供基于 FFmpeg 的视频编解码功能，支持 MP4 格式。
+VideoCodec 模块提供基于 FFmpeg 的 H.264 视频数据读取/写入功能，**不解码为 YUV**，直接处理 H.264 NAL 单元。
 
-- **VideoEncoder**: 视频读取器，从 MP4 文件解码并提取帧
-- **VideoDecoder**: 视频写入器，将帧编码为 MP4 文件
+**适用场景：**
+- 视频网络传输（配合 RaptorQ FEC）
+- 视频文件复制/转封装
+- 需要直接处理 H.264 数据的场景
 
-## 依赖
+**优势：**
+- 相比 YUV 透传，带宽节省约 20-50 倍
+- 保留 I/P/B 帧信息，支持差异化传输
+- 无需编解码，CPU 占用低
 
-- FFmpeg 开发库（至少包含 `libavformat`、`libavcodec`、`libavutil`、`libswscale`）
-- 已在 FFmpeg 4.x 环境下测试（使用新版 API，无需 `av_register_all()`）
+## 核心组件
+
+| 组件 | 功能 |
+|------|------|
+| `VideoReader` | 从 MP4 读取 H.264 NAL 单元 |
+| `VideoWriter` | 将 H.264 NAL 单元写入 MP4 |
 
 ## 数据结构
 
-### VideoFrame - 视频帧
+### EncodedFrame - 编码后的视频帧
+
 ```cpp
-struct VideoFrame {
-    uint8_t* data[4];       // YUV 数据指针 (Y, U, V, 保留)
-    int linesize[4];        // 每行字节数
-    int width;              // 帧宽度
-    int height;             // 帧高度
-    int64_t pts;            // 时间戳
-    int64_t dts;            // 解码时间戳
-    bool is_key_frame;      // 是否关键帧
+struct EncodedFrame {
+    std::vector<uint8_t> data;      // H.264 NAL 单元数据
+    int64_t pts;                    // 显示时间戳（毫秒）
+    int64_t dts;                    // 解码时间戳（毫秒）
+    bool is_key_frame;              // 是否关键帧
+    FrameType type;                 // 帧类型 (I/P/B)
+    uint32_t gop_id;                // GOP 编号
+};
+```
+
+### FrameType - 帧类型
+
+```cpp
+enum class FrameType : uint8_t {
+    UNKNOWN = 0,
+    I_FRAME = 1,    // 关键帧（IDR）
+    P_FRAME = 2,    // 前向预测帧
+    B_FRAME = 3,    // 双向预测帧
 };
 ```
 
 ### VideoInfo - 视频信息
+
 ```cpp
 struct VideoInfo {
-    std::string format_name;    // 格式名称
-    std::string codec_name;     // 编码器名称
-    int width;                  // 视频宽度
-    int height;                 // 视频高度
-    int fps_num;                // 帧率分子
-    int fps_den;                // 帧率分母
-    int64_t duration_ms;        // 时长 (毫秒)
-    int64_t bitrate;            // 比特率
-    int64_t frame_count;        // 总帧数
-    std::string pixel_format;   // 像素格式
-};
-```
-
-### EncodeParams - 编码参数
-```cpp
-struct EncodeParams {
-    int width = 1920;               // 视频宽度
-    int height = 1080;              // 视频高度
-    int fps_num = 30;               // 帧率分子
-    int fps_den = 1;                // 帧率分母
-    int64_t bitrate = 2000000;      // 比特率 (bps)
+    std::string format_name;        // 格式名称
     std::string codec_name;         // 编码器名称
-    std::string pixel_format;       // 像素格式
+    int width, height;              // 分辨率
+    int fps_num, fps_den;           // 帧率
+    int64_t duration_ms;            // 时长
+    int64_t bitrate;                // 比特率
+    int gop_size;                   // GOP 大小
+    std::vector<uint8_t> extradata; // SPS/PPS 数据
 };
 ```
 
-## VideoEncoder - 视频读取接口
-
-用于从 MP4 文件读取视频帧。
+## VideoReader - 视频读取器
 
 ### 基本用法
+
 ```cpp
-#include "video_encoder.h"
+#include "video_reader.h"
 using namespace VideoCodec;
 
-VideoEncoder encoder;
-if (encoder.Open("input.mp4")) {
+VideoReader reader;
+if (reader.Open("input.mp4")) {
     // 获取视频信息
-    VideoInfo info = encoder.GetVideoInfo();
+    VideoInfo info = reader.GetVideoInfo();
     std::cout << "分辨率: " << info.width << "x" << info.height << std::endl;
+    std::cout << "GOP大小: " << info.gop_size << std::endl;
     
     // 逐帧读取
-    VideoFrame frame;
-    while (encoder.ReadFrame(frame)) {
-        // frame.data[0] = Y 平面
-        // frame.data[1] = U 平面
-        // frame.data[2] = V 平面
-        // 处理帧...
+    EncodedFrame frame;
+    while (reader.ReadFrame(frame)) {
+        // frame.data 包含 H.264 NAL 单元
+        // frame.is_key_frame 标识是否为 I 帧
+        // frame.type 标识为 I/P/B 帧
+        
+        if (frame.type == FrameType::I_FRAME) {
+            // I 帧处理（高优先级）
+        } else {
+            // P/B 帧处理
+        }
     }
     
-    encoder.Close();
+    reader.Close();
 }
-```
-
-### 使用回调读取
-```cpp
-encoder.ReadAllFrames([](const VideoFrame& frame) -> bool {
-    // 处理帧
-    // 返回 true 继续，false 停止
-    return true;
-});
 ```
 
 ### 主要接口
@@ -100,43 +102,33 @@ encoder.ReadAllFrames([](const VideoFrame& frame) -> bool {
 | `Open(filepath)` | 打开视频文件 |
 | `Close()` | 关闭文件 |
 | `IsOpen()` | 检查是否已打开 |
-| `ReadFrame(frame)` | 读取一帧 |
-| `ReadAllFrames(callback)` | 使用回调读取所有帧 |
-| `GetVideoInfo()` | 获取视频信息 |
+| `ReadFrame(frame)` | 读取一帧 H.264 数据 |
+| `GetVideoInfo()` | 获取视频信息（包含 extradata） |
 | `Seek(timestamp_ms)` | 跳转到指定时间 |
-| `GetCurrentTimestamp()` | 获取当前时间戳 |
 
-## VideoDecoder - 视频写入接口
-
-用于将帧编码为 MP4 文件。
+## VideoWriter - 视频写入器
 
 ### 基本用法
+
 ```cpp
-#include "video_decoder.h"
+#include "video_writer.h"
 using namespace VideoCodec;
 
-// 设置编码参数
-EncodeParams params;
-params.width = 640;
-params.height = 480;
-params.fps_num = 30;
-params.bitrate = 2000000;
+// 从输入文件获取参数
+VideoReader reader;
+reader.Open("input.mp4");
+VideoInfo info = reader.GetVideoInfo();
 
-VideoDecoder decoder;
-if (decoder.Create("output.mp4", params)) {
-    // 准备 YUV 数据
-    std::vector<uint8_t> y_data(width * height);
-    std::vector<uint8_t> u_data(width * height / 4);
-    std::vector<uint8_t> v_data(width * height / 4);
-    
-    // 填充 YUV 数据...
-    
-    // 写入帧
-    for (int i = 0; i < num_frames; i++) {
-        decoder.WriteYUVData(y_data.data(), u_data.data(), v_data.data(), i);
+// 创建输出文件（复制输入文件的参数）
+VideoWriter writer;
+VideoWriterParams params = VideoWriterParams::FromVideoInfo(info);
+
+if (writer.Create("output.mp4", params)) {
+    EncodedFrame frame;
+    while (reader.ReadFrame(frame)) {
+        writer.WriteFrame(frame);
     }
-    
-    decoder.Close();
+    writer.Close();
 }
 ```
 
@@ -145,43 +137,11 @@ if (decoder.Create("output.mp4", params)) {
 | 接口 | 说明 |
 |------|------|
 | `Create(filepath, params)` | 创建输出文件 |
-| `Close()` | 关闭文件，完成编码 |
+| `Close()` | 关闭文件，完成封装 |
 | `IsOpen()` | 检查是否已创建 |
-| `WriteFrame(frame)` | 写入一帧 |
-| `WriteYUVData(y, u, v, pts)` | 写入 YUV 数据 |
-| `GetFrameTemplate()` | 获取帧模板 |
-| `Flush()` | 刷新编码器 |
+| `WriteFrame(frame)` | 写入一帧 H.264 数据 |
+| `WriteH264Data(data, size, pts, is_key)` | 写入原始 H.264 数据 |
 | `GetFrameCount()` | 获取已写入帧数 |
-
-## 后续集成建议
-
-### 与网络传输集成
-
-可以将 VideoEncoder 读取的帧通过网络传输，然后在接收端使用 VideoDecoder 写入文件：
-
-```cpp
-// 发送端
-VideoEncoder encoder;
-encoder.Open("input.mp4");
-
-VideoFrame frame;
-while (encoder.ReadFrame(frame)) {
-    // 将 YUV 数据打包发送到网络
-    send_yuv_data(frame.data[0], frame.linesize[0] * frame.height);  // Y
-    send_yuv_data(frame.data[1], frame.linesize[1] * frame.height/2); // U
-    send_yuv_data(frame.data[2], frame.linesize[2] * frame.height/2); // V
-}
-
-// 接收端
-VideoDecoder decoder;
-decoder.Create("output.mp4", params);
-
-while (receive_frame()) {
-    // 接收 YUV 数据
-    decoder.WriteYUVData(y_data, u_data, v_data, pts);
-}
-decoder.Close();
-```
 
 ## 编译
 
@@ -193,15 +153,66 @@ make all
 ## 测试
 
 ```bash
-# 测试视频读取
-make test-encode
-
-# 测试视频生成
-make test-decode
-
-# 运行联合测试，会将原视频编码再解码
-make test-transcode
-
-# 运行所有测试
+# 运行测试（读取 + 写入 + 验证）
 make test
+
+# 手动测试
+./build/test_codec <input.mp4> [output.mp4]
 ```
+
+## 与网络传输集成
+
+```cpp
+// 发送端
+VideoReader reader;
+reader.Open("input.mp4");
+
+EncodedFrame frame;
+while (reader.ReadFrame(frame)) {
+    // 根据帧类型设置不同的传输参数
+    if (frame.type == FrameType::I_FRAME) {
+        // I 帧：小符号、高冗余（30%）
+        send_with_high_protection(frame.data);
+    } else {
+        // P/B 帧：大符号、标准冗余（10%）
+        send_with_standard_protection(frame.data);
+    }
+}
+
+// 接收端
+VideoWriter writer;
+VideoWriterParams params;
+params.width = 1920;
+params.height = 1080;
+// ... 设置其他参数
+writer.Create("output.mp4", params);
+
+while (receive_frame()) {
+    EncodedFrame frame;
+    frame.data = received_data;
+    frame.pts = timestamp;
+    frame.is_key_frame = is_key;
+    frame.type = frame_type;
+    
+    writer.WriteFrame(frame);
+}
+writer.Close();
+```
+
+## 注意事项
+
+1. **extradata**: VideoWriter 需要输入文件的 extradata（SPS/PPS），建议通过 `VideoWriterParams::FromVideoInfo()` 创建参数
+
+2. **时间戳**: 使用毫秒时间戳，内部自动转换为流的 time_base
+
+3. **帧类型检测**: VideoReader 通过 NAL 单元类型自动检测 I/P/B 帧
+
+4. **B 帧处理**: 当前实现使用单调递增的 DTS 处理 B 帧，适合传输场景
+
+## 历史变更
+
+- **2026-03-10**: 重构为 H.264 NAL 透传模式
+  - 移除 YUV 编解码（旧版 VideoEncoder/VideoDecoder）
+  - 新增 VideoReader/VideoWriter 直接处理 H.264 数据
+  - 支持 I/P/B 帧类型识别
+  - 支持 extradata（SPS/PPS）复制
