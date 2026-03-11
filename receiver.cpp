@@ -48,11 +48,11 @@ void Receiver::start() {
   // 等待所有队列初始化完成
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   
+  // 启动网络服务器（非阻塞版本）
+  server_.startAsync();
+  
   std::cout << "Receiver: 已启动 " << thread_count_ 
             << " 个工作线程（每个线程一个队列和 EventLoop）" << std::endl;
-  
-  // 启动网络服务器（阻塞）
-  server_.start();
 }
 
 void Receiver::stop() {

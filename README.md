@@ -287,6 +287,134 @@ make all
 3. **冗余比例**: 根据网络丢包率调整（10-30%）
 4. **发送间隔**: 避免网络拥塞，根据带宽调整
 
+## 视频传输功能
+
+基于 H.264 NAL 直通 + RaptorQ FEC 的实时视频流传输。
+
+### 特性
+
+- **H.264 NAL 直通**: 不编解码，直接传输 MP4 文件中的 H.264 数据，带宽效率高 (~2-5MB/s vs ~93MB/s)
+- **智能 FEC 策略**: I-帧 50% 冗余，P/B-帧 30% 冗余
+- **保序播放**: 接收端按帧序号顺序写入，支持乱序缓存和丢帧处理
+- **流ID分离**: 配置流(stream_id=0)与视频流(stream_id>=1)独立传输
+
+### 快速开始
+
+```bash
+# 1. 准备测试视频（生成 5 秒 1280x720 H.264 测试视频）
+ffmpeg -f lavfi -i testsrc=duration=5:size=1280x720:rate=30 -pix_fmt yuv420p input.mp4
+
+# 2. 终端1 - 启动接收端
+./build/video_streaming_demo receiver 9001 output.mp4
+
+# 3. 终端2 - 启动发送端
+./build/video_streaming_demo sender 127.0.0.1 9001 input.mp4
+
+# 4. 按 Ctrl+C 结束（接收端会自动关闭视频文件）
+
+# 5. 播放输出视频
+ffplay output.mp4
+```
+
+### 使用说明
+
+**接收端参数:**
+```
+./build/video_streaming_demo receiver <port> <output.mp4>
+```
+- `port`: 监听端口（默认 9001）
+- `output.mp4`: 输出视频文件路径
+
+**发送端参数:**
+```
+./build/video_streaming_demo sender <server_addr> <port> <input.mp4>
+```
+- `server_addr`: 接收端地址
+- `port`: 接收端端口
+- `input.mp4`: 输入视频文件（H.264 编码）
+
+### 发送间隔参数
+
+在 `video_transmit_params.h` 中调整：
+
+```cpp
+struct FrameTransmitParams {
+    uint32_t send_interval_us = 10000;  // 10ms = 100fps 上限
+    // ...
+};
+```
+
+### 接收统计
+
+接收端会实时输出帧接收统计：
+
+```
+[接收统计] [FrameStats] 总计:150 成功:150 丢弃(满):0 丢弃(旧):0 缓存:0 (成功率:100%)
+```
+
+| 指标 | 说明 |
+|------|------|
+| 总计 | 收到的帧总数 |
+| 成功 | 成功写入视频的帧数 |
+| 丢弃(满) | 缓存满丢弃的帧 |
+| 丢弃(旧) | 过期的帧（已收到更新的帧） |
+| 缓存 | 等待顺序到达的帧数 |
+
+### 系统架构
+
+```
+发送端                                        接收端
+┌─────────────────┐                          ┌─────────────────┐
+│ VideoReader     │                          │ UDPServer       │
+│ 读取 H.264 NAL  │                          │ 接收 UDP 包     │
+│       ↓         │                          │       ↓         │
+│ 区分 I/P/B 帧   │      UDP 包              │ Receiver        │
+│       ↓         │  ═══════════════════►    │ RaptorQ 解码    │
+│ RaptorQ 编码    │                          │       ↓         │
+│ (I帧50%/PB30%)  │                          │ 按帧序排序      │
+│       ↓         │                          │       ↓         │
+│ UDPSender       │                          │ VideoWriter     │
+│ 发送符号        │                          │ 写入 MP4        │
+└─────────────────┘                          └─────────────────┘
+```
+
+### 关键技术点
+
+**1. H.264 NAL 直通**
+- 不解码视频，直接提取 MP4 中的 NAL 单元
+- SPS/PPS 作为配置流先行发送（stream_id=0）
+- 视频帧使用递增 stream_id（从1开始）
+
+**2. 差异化 FEC**
+- I-帧：符号大小 1024B，50% 冗余（容忍 33% 丢包）
+- P/B-帧：符号大小 1024B，30% 冗余（容忍 23% 丢包）
+
+**3. 保序交付**
+- 接收端维护 `next_expected_frame_seq` 计数器
+- 乱序帧缓存（最多 100 帧）
+- 过期帧自动丢弃
+
+### 故障排查
+
+**视频无法播放**
+```bash
+# 检查输出文件是否完整
+ffprobe output.mp4
+
+# 强制重新封装修复
+ffmpeg -i output.mp4 -c copy fixed.mp4
+```
+
+**接收端收不到帧**
+- 确认端口未被占用：`lsof -i :9001`
+- 检查输入视频格式：`ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1 input.mp4`
+- 确保是 H.264 编码
+
+**帧丢失过多**
+- 增加冗余比例（修改 `video_common.h` 中的 `repair_ratio`）
+- 降低发送速率（增大 `send_interval_us`）
+- 检查网络带宽
+
 ## License
 
 MIT

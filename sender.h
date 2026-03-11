@@ -55,6 +55,19 @@ class Sender {
    * @return true 成功放入队列，false 队列满或已停止
    */
   bool sendData(uint64_t stream_id, std::shared_ptr<std::string> data);
+  
+  /**
+   * 发送预编码的符号（异步，非阻塞）
+   * 数据不会再次进行RaptorQ编码，直接发送
+   * 用于视频传输等需要自定义编码参数的场景
+   * @param stream_id 流ID
+   * @param symbols 已编码的符号列表
+   * @param original_size 原始数据大小
+   * @param symbol_size 符号大小
+   * @return true 成功放入队列，false 队列满或已停止
+   */
+  bool sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& symbols,
+                   uint32_t original_size, uint16_t symbol_size);
     
   /**
    * 设置 RaptorQ 修复符号比例

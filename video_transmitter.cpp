@@ -1,0 +1,360 @@
+/**
+ * video_transmitter.cpp - 视频发送端实现
+ */
+
+#include "video_transmitter.h"
+#include "pack/rq_pack.h"
+#include "common.h"
+
+#include <iostream>
+#include <cstring>
+
+namespace VideoTransmit {
+
+VideoTransmitter::VideoTransmitter(const std::string& server_addr, 
+                                   uint16_t server_port,
+                                   uint32_t encode_threads)
+    : video_reader_(std::make_unique<VideoCodec::VideoReader>())
+    , video_opened_(false)
+    , sender_(std::make_unique<Sender>(server_addr, server_port, 2048, encode_threads))
+    , server_addr_(server_addr)
+    , server_port_(server_port)
+    , running_(false)
+    , send_thread_running_(false)
+    , frame_seq_counter_(0)
+    , gop_counter_(0)
+    , block_id_counter_(1)  // 从1开始，0保留给配置
+    , current_gop_id_(0)
+    , frame_in_gop_(0) {
+}
+
+VideoTransmitter::~VideoTransmitter() {
+    Stop();
+    CloseVideoFile();
+}
+
+bool VideoTransmitter::OpenVideoFile(const std::string& filepath) {
+    if (running_) {
+        std::cerr << "VideoTransmitter: Cannot open file while running" << std::endl;
+        return false;
+    }
+    
+    if (video_opened_) {
+        CloseVideoFile();
+    }
+    
+    if (!video_reader_->Open(filepath)) {
+        std::cerr << "VideoTransmitter: Failed to open video file: " << filepath << std::endl;
+        return false;
+    }
+    
+    video_opened_ = true;
+    current_gop_id_ = 0;
+    frame_in_gop_ = 0;
+    
+    std::cout << "VideoTransmitter: Opened " << filepath << std::endl;
+    return true;
+}
+
+void VideoTransmitter::CloseVideoFile() {
+    if (video_opened_) {
+        video_reader_->Close();
+        video_opened_ = false;
+    }
+}
+
+void VideoTransmitter::Start() {
+    if (running_) {
+        return;
+    }
+    
+    if (!video_opened_) {
+        ReportError("Video file not opened");
+        return;
+    }
+    
+    running_ = true;
+    send_thread_running_ = true;
+    
+    // 启动发送器
+    sender_->start();
+    
+    // 启动发送线程
+    send_thread_ = std::thread(&VideoTransmitter::SendThreadFunc, this);
+    
+    std::cout << "VideoTransmitter: Started" << std::endl;
+}
+
+void VideoTransmitter::Stop() {
+    if (!running_) {
+        return;
+    }
+    
+    running_ = false;
+    send_thread_running_ = false;
+    
+    // 等待发送线程结束
+    if (send_thread_.joinable()) {
+        send_thread_.join();
+    }
+    
+    // 停止发送器
+    sender_->stop();
+    
+    std::cout << "VideoTransmitter: Stopped" << std::endl;
+}
+
+void VideoTransmitter::SetSendCallback(VideoSendCallback callback) {
+    send_callback_ = callback;
+}
+
+void VideoTransmitter::SetErrorCallback(VideoErrorCallback callback) {
+    error_callback_ = callback;
+}
+
+bool VideoTransmitter::IsVideoOpen() const {
+    return video_opened_;
+}
+
+VideoTransmitStats VideoTransmitter::GetStatistics() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return stats_;
+}
+
+VideoCodec::VideoInfo VideoTransmitter::GetVideoInfo() const {
+    if (video_opened_) {
+        return video_reader_->GetVideoInfo();
+    }
+    return VideoCodec::VideoInfo();
+}
+
+void VideoTransmitter::SendThreadFunc() {
+    std::cout << "VideoTransmitter: Send thread started" << std::endl;
+    
+    // 首先发送视频配置
+    if (!SendVideoConfig()) {
+        ReportError("Failed to send video config");
+        return;
+    }
+    
+    // 读取并发送帧
+    VideoCodec::EncodedFrame frame;
+    int frame_count = 0;
+    while (send_thread_running_ && video_reader_->ReadFrame(frame)) {
+        frame_count++;
+        std::cout << "[VideoTransmitter] Read frame " << frame_count 
+                  << " (" << VideoCodec::FrameTypeToString(frame.type)
+                  << ", " << frame.data.size() << " bytes)" << std::endl;
+        
+        if (!SendFrame(frame)) {
+            ReportError("Failed to send frame " + std::to_string(frame_count));
+            continue;
+        }
+        
+        // GOP管理
+        if (frame.is_key_frame) {
+            current_gop_id_++;
+            frame_in_gop_ = 0;
+        }
+        frame_in_gop_++;
+    }
+    
+    std::cout << "VideoTransmitter: Send thread finished, sent " << frame_count << " frames" << std::endl;
+}
+
+bool VideoTransmitter::SendVideoConfig() {
+    auto info = video_reader_->GetVideoInfo();
+    
+    // 构建配置包
+    VideoConfigPacket config_packet;
+    config_packet.config.width = info.width;
+    config_packet.config.height = info.height;
+    config_packet.config.fps_num = info.fps_num;
+    config_packet.config.fps_den = info.fps_den;
+    config_packet.config.bitrate = info.bitrate;
+    config_packet.config.gop_size = info.gop_size;
+    strncpy(config_packet.config.codec_name, info.codec_name.c_str(), 
+            sizeof(config_packet.config.codec_name) - 1);
+    config_packet.config.extradata_size = info.extradata.size();
+    config_packet.extradata = info.extradata;
+    
+    // 序列化配置数据
+    auto config_data = config_packet.Serialize();
+    
+    // 构建带头部的数据
+    VideoFrameHeader header;
+    header.frame_type = FrameType::CONFIG;
+    header.flags = FLAG_CONFIG_FRAME;
+    header.frame_size = config_data.size();
+    header.frame_seq = frame_seq_counter_++;
+    
+    std::vector<uint8_t> packet_data(sizeof(VideoFrameHeader) + config_data.size());
+    memcpy(packet_data.data(), &header, sizeof(VideoFrameHeader));
+    memcpy(packet_data.data() + sizeof(VideoFrameHeader), config_data.data(), config_data.size());
+    
+    // 使用RaptorQ编码并直接发送
+    auto params = FrameTransmitParams::IFrameParams();
+    params.repair_ratio = 1.0f;  // 100%冗余
+    params.symbol_size = 1024;
+    
+    // 创建RaptorQ编码器
+    RQPack::Encoder encoder(packet_data.data(), packet_data.size(), params.symbol_size);
+    if (!encoder.isReady()) {
+        return false;
+    }
+    
+    uint32_t source_symbols = encoder.getSourceSymbolCount();
+    uint32_t repair_symbols = static_cast<uint32_t>(source_symbols * params.repair_ratio);
+    auto symbols = encoder.encodeAll(repair_symbols);
+    
+    // 使用Sender发送预编码的符号（避免双重编码）
+    uint32_t block_id = 0;  // 配置用block_id = 0
+    sender_->sendSymbols(block_id, symbols, packet_data.size(), params.symbol_size);
+    
+    std::cout << "VideoTransmitter: Sent video config (" << packet_data.size() << " bytes, " 
+              << symbols.size() << " symbols)" << std::endl;
+    
+    // 等待配置发送完成
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    return true;
+}
+
+bool VideoTransmitter::SendFrame(const VideoCodec::EncodedFrame& frame) {
+    uint32_t frame_seq = frame_seq_counter_++;
+    
+    // 确定帧类型
+    FrameType frame_type;
+    switch (frame.type) {
+        case VideoCodec::FrameType::I_FRAME:
+            frame_type = FrameType::I_FRAME;
+            break;
+        case VideoCodec::FrameType::P_FRAME:
+            frame_type = FrameType::P_FRAME;
+            break;
+        case VideoCodec::FrameType::B_FRAME:
+            frame_type = FrameType::B_FRAME;
+            break;
+        default:
+            frame_type = frame.is_key_frame ? FrameType::I_FRAME : FrameType::P_FRAME;
+    }
+    
+    // 获取传输参数
+    auto params = GetTransmitParams(frame_type);
+    
+    // 构建帧数据
+    auto frame_data = BuildFrameData(frame, frame_seq);
+    
+    // 创建RaptorQ编码器
+    RQPack::Encoder encoder(frame_data.data(), frame_data.size(), params.symbol_size);
+    if (!encoder.isReady()) {
+        return false;
+    }
+    
+    uint32_t source_symbols = encoder.getSourceSymbolCount();
+    uint32_t repair_symbols = static_cast<uint32_t>(source_symbols * params.repair_ratio);
+    auto symbols = encoder.encodeAll(repair_symbols);
+    
+    // Source Block ID
+    uint32_t block_id = block_id_counter_++;
+    
+    // 使用Sender发送预编码的符号（避免双重编码）
+    // 设置发送间隔
+    sender_->setSendInterval(params.send_interval_us);
+    
+    // 发送符号
+    bool sent = sender_->sendSymbols(block_id, symbols, frame_data.size(), params.symbol_size);
+    uint32_t symbols_sent = sent ? symbols.size() : 0;
+    
+    // 更新统计
+    UpdateStats(frame_type, frame_data.size(), symbols_sent);
+    
+    // 回调
+    if (send_callback_) {
+        send_callback_(frame_seq, frame_type, frame_data.size(), symbols_sent == symbols.size());
+    }
+    
+    // 打印进度
+    if (frame_seq % 30 == 0) {
+        std::cout << "VideoTransmitter: Sent frame " << frame_seq 
+                  << " (" << VideoCodec::FrameTypeToString(static_cast<VideoCodec::FrameType>(frame.type))
+                  << ", " << frame.data.size() << " bytes, " 
+                  << symbols_sent << "/" << symbols.size() << " symbols)" << std::endl;
+    }
+    
+    return symbols_sent > 0;
+}
+
+std::vector<uint8_t> VideoTransmitter::BuildFrameData(const VideoCodec::EncodedFrame& frame,
+                                                       uint32_t frame_seq) {
+    // 构建视频帧头部
+    VideoFrameHeader header;
+    
+    // 显式转换帧类型（两个枚举定义不同，不能static_cast）
+    switch (frame.type) {
+        case VideoCodec::FrameType::I_FRAME:
+            header.frame_type = FrameType::I_FRAME;
+            break;
+        case VideoCodec::FrameType::P_FRAME:
+            header.frame_type = FrameType::P_FRAME;
+            break;
+        case VideoCodec::FrameType::B_FRAME:
+            header.frame_type = FrameType::B_FRAME;
+            break;
+        default:
+            header.frame_type = frame.is_key_frame ? FrameType::I_FRAME : FrameType::P_FRAME;
+            break;
+    }
+    header.flags = FLAG_FIRST_SYMBOL | FLAG_LAST_SYMBOL;
+    header.pts = frame.pts;
+    header.dts = frame.dts;
+    header.gop_id = current_gop_id_;
+    header.frame_in_gop = frame_in_gop_;
+    header.frame_size = frame.data.size();
+    header.frame_seq = frame_seq;
+    header.source_block_id = block_id_counter_.load();
+    
+    // 计算总符号数
+    auto params = GetTransmitParams(header.frame_type);
+    uint32_t k = (frame.data.size() + params.symbol_size - 1) / params.symbol_size;
+    uint32_t n = static_cast<uint32_t>(k * (1 + params.repair_ratio));
+    header.total_symbols = n;
+    
+    // 组装数据：头部 + H.264数据
+    std::vector<uint8_t> data(sizeof(VideoFrameHeader) + frame.data.size());
+    memcpy(data.data(), &header, sizeof(VideoFrameHeader));
+    memcpy(data.data() + sizeof(VideoFrameHeader), frame.data.data(), frame.data.size());
+    
+    return data;
+}
+
+void VideoTransmitter::UpdateStats(FrameType type, size_t bytes_sent, uint32_t symbols) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.frames_sent++;
+    stats_.bytes_sent += bytes_sent;
+    stats_.symbols_sent += symbols;
+    stats_.source_blocks_sent++;
+    
+    switch (type) {
+        case FrameType::I_FRAME:
+            stats_.i_frames_sent++;
+            break;
+        case FrameType::P_FRAME:
+            stats_.p_frames_sent++;
+            break;
+        case FrameType::B_FRAME:
+            stats_.b_frames_sent++;
+            break;
+        default:
+            break;
+    }
+}
+
+void VideoTransmitter::ReportError(const std::string& error) {
+    std::cerr << "VideoTransmitter Error: " << error << std::endl;
+    if (error_callback_) {
+        error_callback_(error);
+    }
+}
+
+} // namespace VideoTransmit

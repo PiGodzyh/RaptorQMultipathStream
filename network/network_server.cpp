@@ -149,12 +149,23 @@ public:
         
         running_ = false;
         
+        // 先关闭 socket，强制中断阻塞的 recvfrom
+        if (sockfd_ >= 0) {
+            int fd = sockfd_;
+            sockfd_ = -1;  // 先标记为关闭，防止回调中使用
+            close(fd);
+        }
+        
+        // 唤醒事件循环
         if (event_base_) {
             event_base_loopbreak(event_base_);
         }
         
+        // 等待事件线程结束（带超时）
         if (event_thread_.joinable()) {
-            event_thread_.join();
+            // 使用 try_join_for (C++20) 或类似的超时机制
+            // 这里使用简单的方法：分离线程，避免阻塞
+            event_thread_.detach();
         }
         
         if (event_) {
@@ -165,11 +176,6 @@ public:
         if (event_base_) {
             event_base_free(event_base_);
             event_base_ = nullptr;
-        }
-        
-        if (sockfd_ >= 0) {
-            close(sockfd_);
-            sockfd_ = -1;
         }
     }
     

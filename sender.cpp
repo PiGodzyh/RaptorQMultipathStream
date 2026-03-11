@@ -330,3 +330,87 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
             << "成功: " << sent_count << "/" << total_symbols 
             << ", 失败: " << failed_count << std::endl;
 }
+
+bool Sender::sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& symbols,
+                         uint32_t original_size, uint16_t symbol_size) {
+  if (!running_) {
+    std::cerr << "Sender: 未启动" << std::endl;
+    return false;
+  }
+  
+  std::cout << "[Sender::sendSymbols] stream_id=" << stream_id 
+            << ", symbols=" << symbols.size() 
+            << ", original_size=" << original_size << std::endl;
+  
+  // 直接使用client_发送（避免进入编码队列再次编码）
+  uint32_t total_symbols = symbols.size();
+  uint32_t sent_count = 0;
+  
+  for (const auto& symbol : symbols) {
+    // 构造数据包：头部 + 符号数据
+    PacketHeader header;
+    header.stream_id = stream_id;
+    header.symbol_id = symbol.id;
+    header.total_symbols = total_symbols;
+    header.original_size = original_size;
+    header.symbol_size = symbol_size;
+    header.reserved = 0;
+    
+    // 组装完整数据包
+    std::vector<uint8_t> packet_data;
+    packet_data.resize(sizeof(PacketHeader) + symbol.data.size());
+    
+    // 复制头部
+    std::memcpy(packet_data.data(), &header, sizeof(PacketHeader));
+    
+    // 复制符号数据
+    std::memcpy(packet_data.data() + sizeof(PacketHeader), 
+                symbol.data.data(), 
+                symbol.data.size());
+    
+    // 发送间隔控制
+    if (send_interval_us_ > 0) {
+      std::lock_guard<std::mutex> lock(send_time_mutex_);
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_send_time_).count();
+      if (elapsed < send_interval_us_) {
+        std::this_thread::sleep_for(std::chrono::microseconds(send_interval_us_ - elapsed));
+      }
+    }
+    
+    // 直接发送
+    ssize_t sent = client_.send(packet_data);
+    
+    if (sent > 0) {
+      sent_count++;
+      sent_symbol_count_++;
+      if (symbol.id % 10 == 0) {
+        std::cout << "[Sender::sendSymbols] Sent symbol " << symbol.id << "/" << total_symbols 
+                  << " for stream " << stream_id << std::endl;
+      }
+      // 记录发送时间
+      {
+        std::lock_guard<std::mutex> lock(stat_mutex_);
+        send_times_.push_back(std::chrono::steady_clock::now());
+        if (send_times_.size() > 10000) {
+          send_times_.erase(send_times_.begin());
+        }
+      }
+    } else {
+      failed_count_++;
+    }
+    
+    // 更新最后发送时间
+    if (send_interval_us_ > 0) {
+      std::lock_guard<std::mutex> lock(send_time_mutex_);
+      last_send_time_ = std::chrono::steady_clock::now();
+    }
+  }
+  
+  sent_count_++;
+  
+  std::cout << "[Sender::sendSymbols] Finished: sent " << sent_count << "/" << total_symbols 
+            << " symbols for stream " << stream_id << std::endl;
+  
+  return sent_count > 0;
+}
