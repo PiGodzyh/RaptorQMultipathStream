@@ -394,6 +394,95 @@ struct FrameTransmitParams {
 - 乱序帧缓存（最多 100 帧）
 - 过期帧自动丢弃
 
+## 多数据流传输（统一入口）
+
+一个可执行文件管理四种数据类型的传输，端口分配如下：
+
+| 数据类型 | 端口 | FEC策略 | 特性 |
+|---------|------|---------|------|
+| 飞控指令 | 9000 | 50%冗余，50ms超时 | 终端实时交互 |
+| 视频流 | 9001 | I帧50%/P帧30%冗余 | H.264 NAL直通 |
+| 点云 | 9002 | 10%冗余，8192B符号 | Livox CustomMsg格式 |
+| 栅格地图 | 9003 | 20%冗余，4096B符号 | Eigen::Vector3d格式 |
+
+### 使用方法
+
+```bash
+./build/multi_streaming_demo <receiver|sender> <type> [参数...]
+```
+
+**飞控指令（交互式）**
+```bash
+# 终端1 - 接收端
+./build/multi_streaming_demo receiver fc 9000
+
+# 终端2 - 发送端（实时输入）
+./build/multi_streaming_demo sender fc 127.0.0.1 9000
+# 输入指令如: TAKEOFF, LAND, MOVE 1.0 2.0 3.0
+# 优先级: !high TAKEOFF, !normal HOVER, !low STATUS
+```
+
+**点云传输**
+```bash
+# 终端1 - 接收端
+./build/multi_streaming_demo receiver pointcloud 9002
+
+# 终端2 - 发送测试点云（1000点/帧，10帧）
+./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 test
+
+# 或发送PCD文件（从 data/pointcloud/ 读取）
+./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 room_5k.pcd
+```
+
+**栅格地图传输**
+```bash
+# 终端1 - 接收端
+./build/multi_streaming_demo receiver gridmap 9003
+
+# 终端2 - 发送测试地图（100x100单元格）
+./build/multi_streaming_demo sender gridmap 127.0.0.1 9003 test
+
+# 或发送文件（从 data/gridmap/ 读取）
+./build/multi_streaming_demo sender gridmap 127.0.0.1 9003 office_200x200.grid
+```
+
+**视频传输（使用统一入口）**
+```bash
+# 终端1 - 接收端
+./build/multi_streaming_demo receiver video 9001 output.mp4
+
+# 终端2 - 发送端（从 data/videos/ 读取）
+./build/multi_streaming_demo sender video 127.0.0.1 9001 input.mp4
+```
+
+### 目录结构
+
+```
+data/                      # 输入文件目录
+├── videos/
+├── fc/
+├── pointcloud/
+└── gridmap/
+
+output/                    # 输出文件目录
+├── videos/
+├── fc/                    # 飞控指令日志
+├── pointcloud/            # 接收的点云PCD文件
+└── gridmap/               # 接收的栅格地图文件
+```
+
+### 生成样例数据
+
+```bash
+# 生成点云和栅格地图样例数据
+make gen-data
+```
+
+生成的样例数据：
+- **点云**: `data/pointcloud/room_5k.pcd` (5000点，室内房间场景), `outdoor_10k.pcd` (10000点)
+- **栅格地图**: `data/gridmap/office_200x200.grid` (10x10米办公室), `warehouse_300x300.grid` (15x15米仓库)
+- **文本预览**: `data/gridmap/office_preview.txt` (ASCII艺术可视化)
+
 ### 故障排查
 
 **视频无法播放**

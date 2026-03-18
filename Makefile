@@ -41,6 +41,13 @@ VIDEO_STREAMING_SRC = video_streaming_demo.cpp video_transmitter.cpp video_recei
 VIDEO_CODEC_SRC = VideoCodec/video_reader.cpp VideoCodec/video_writer.cpp
 
 # ============================================
+# 多数据流传输 - 源文件
+# ============================================
+MULTI_STREAMING_SRC = multi_streaming_demo.cpp video_transmitter.cpp video_receiver.cpp \
+                      fc_control.cpp point_cloud.cpp grid_map.cpp \
+                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp
+
+# ============================================
 # 子模块对象文件
 # ============================================
 NETWORK_OBJS = network/build/network_server.o network/build/network_client.o
@@ -54,6 +61,7 @@ VIDEO_CODEC_OBJS = $(addprefix $(BUILD_DIR)/, $(notdir $(VIDEO_CODEC_SRC:.cpp=.o
 SENDER_OBJS = $(addprefix $(BUILD_DIR)/, $(SENDER_SRC:.cpp=.o))
 RECEIVER_OBJS = $(addprefix $(BUILD_DIR)/, $(RECEIVER_SRC:.cpp=.o))
 VIDEO_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VIDEO_STREAMING_SRC:.cpp=.o))
+MULTI_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(MULTI_STREAMING_SRC:.cpp=.o))
 
 # ============================================
 # 可执行文件
@@ -61,12 +69,13 @@ VIDEO_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VIDEO_STREAMING_SRC:.cpp=.o)
 SENDER_EXE = $(BUILD_DIR)/sender_demo
 RECEIVER_EXE = $(BUILD_DIR)/receiver_demo
 VIDEO_STREAMING_EXE = $(BUILD_DIR)/video_streaming_demo
+MULTI_STREAMING_EXE = $(BUILD_DIR)/multi_streaming_demo
 
 # ============================================
 # 默认目标
 # ============================================
 .PHONY: all
-all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE)
+all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE) $(MULTI_STREAMING_EXE)
 	@echo ""
 	@echo "=========================================="
 	@echo "编译完成！"
@@ -76,6 +85,8 @@ all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE
 	@echo "  接收端: $(RECEIVER_EXE)"
 	@echo "视频传输:"
 	@echo "  收发端: $(VIDEO_STREAMING_EXE)"
+	@echo "多数据流传输:"
+	@echo "  统一入口: $(MULTI_STREAMING_EXE)"
 	@echo "=========================================="
 
 # 创建构建目录
@@ -146,6 +157,30 @@ $(BUILD_DIR)/video_reader.o: VideoCodec/video_reader.cpp VideoCodec/video_reader
 
 $(BUILD_DIR)/video_writer.o: VideoCodec/video_writer.cpp VideoCodec/video_writer.h VideoCodec/video_codec.h
 	@echo "编译 video_writer.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# 多数据流传输 - 编译规则
+# ============================================
+$(MULTI_STREAMING_EXE): $(MULTI_STREAMING_OBJS) $(VIDEO_CODEC_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB)
+	@echo "链接多数据流传输程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+	@echo "✓ 多数据流传输程序编译完成"
+
+$(BUILD_DIR)/multi_streaming_demo.o: multi_streaming_demo.cpp data_common.h video_transmitter.h video_receiver.h fc_control.h point_cloud.h grid_map.h
+	@echo "编译 multi_streaming_demo.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/fc_control.o: fc_control.cpp fc_control.h data_common.h
+	@echo "编译 fc_control.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/point_cloud.o: point_cloud.cpp point_cloud.h data_common.h
+	@echo "编译 point_cloud.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/grid_map.o: grid_map.cpp grid_map.h data_common.h
+	@echo "编译 grid_map.cpp..."
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # ============================================
@@ -233,14 +268,43 @@ help:
 	@echo "  终端1: make run-video-receiver"
 	@echo "  终端2: make run-video-sender"
 	@echo ""
-	@echo "或者直接运行:"
-	@echo "  ./build/video_streaming_demo receiver 9001 output.mp4"
-	@echo "  ./build/video_streaming_demo sender 127.0.0.1 9001 input.mp4"
+	@echo "多数据流传输:"
+	@echo "  视频:    ./build/multi_streaming_demo receiver video 9001 output.mp4"
+	@echo "           ./build/multi_streaming_demo sender video 127.0.0.1 9001 input.mp4"
+	@echo "  飞控:    ./build/multi_streaming_demo receiver fc 9000"
+	@echo "           ./build/multi_streaming_demo sender fc 127.0.0.1 9000"
+	@echo "  点云:    ./build/multi_streaming_demo receiver pointcloud 9002"
+	@echo "           ./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 test"
+	@echo "  栅格:    ./build/multi_streaming_demo receiver gridmap 9003"
+	@echo "           ./build/multi_streaming_demo sender gridmap 127.0.0.1 9003 test"
 
 # ============================================
 # 单独编译目标
 # ============================================
-.PHONY: sender receiver video
+.PHONY: sender receiver video multi
 sender: check-deps $(BUILD_DIR) $(SENDER_EXE)
 receiver: check-deps $(BUILD_DIR) $(RECEIVER_EXE)
 video: check-deps $(BUILD_DIR) $(VIDEO_STREAMING_EXE)
+multi: check-deps $(BUILD_DIR) $(MULTI_STREAMING_EXE)
+
+# ============================================
+# 样例数据生成工具
+# ============================================
+GEN_DATA_SRC = generate_sample_data.cpp
+GEN_DATA_OBJS = $(addprefix $(BUILD_DIR)/, $(GEN_DATA_SRC:.cpp=.o))
+GEN_DATA_EXE = $(BUILD_DIR)/generate_sample_data
+
+.PHONY: gen-data
+
+gen-data: $(GEN_DATA_EXE)
+	@echo "生成样例数据..."
+	@./$(GEN_DATA_EXE)
+
+$(GEN_DATA_EXE): $(GEN_DATA_OBJS) $(PACK_LIB)
+	@echo "链接样例数据生成工具..."
+	@$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+	@echo "✓ 样例数据生成工具编译完成"
+
+$(BUILD_DIR)/generate_sample_data.o: generate_sample_data.cpp data_common.h
+	@echo "编译 generate_sample_data.cpp..."
+	@$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
