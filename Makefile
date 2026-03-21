@@ -7,7 +7,7 @@
 # 编译器和标志
 CXX = g++
 CXXFLAGS = -std=c++14 -Wall -O2 -fPIC
-INCLUDES = -I. -I./pack -I./network -I./event_base -I./libRaptorQ/src -I./VideoCodec
+INCLUDES = -I. -I./pack -I./network -I./event_base -I./libRaptorQ/src -I./VideoCodec -I./VoiceCodec
 # -rpath 让运行时从项目内找到 libRaptorQ，无需设置 LD_LIBRARY_PATH
 LDFLAGS = -L./libRaptorQ/build/lib -Wl,-rpath,'$$ORIGIN/../libRaptorQ/build/lib'
 
@@ -41,6 +41,12 @@ VIDEO_STREAMING_SRC = video_streaming_demo.cpp video_transmitter.cpp video_recei
 VIDEO_CODEC_SRC = VideoCodec/video_reader.cpp VideoCodec/video_writer.cpp
 
 # ============================================
+# 语音传输 - 源文件
+# ============================================
+VOICE_STREAMING_SRC = voice_demo.cpp voice_transmitter.cpp voice_receiver.cpp \
+                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp
+VOICE_CODEC_SRC = VoiceCodec/voice_codec.cpp VoiceCodec/voice_reader.cpp
+
 # 多数据流传输 - 源文件
 # ============================================
 MULTI_STREAMING_SRC = multi_streaming_demo.cpp video_transmitter.cpp video_receiver.cpp \
@@ -54,6 +60,7 @@ NETWORK_OBJS = network/build/network_server.o network/build/network_client.o
 EVENT_OBJS = event_base/build/event_loop.o
 PACK_LIB = pack/build/librqpack.a
 VIDEO_CODEC_OBJS = $(addprefix $(BUILD_DIR)/, $(notdir $(VIDEO_CODEC_SRC:.cpp=.o)))
+VOICE_CODEC_OBJS = $(addprefix $(BUILD_DIR)/, $(notdir $(VOICE_CODEC_SRC:.cpp=.o)))
 
 # ============================================
 # 目标文件
@@ -61,6 +68,7 @@ VIDEO_CODEC_OBJS = $(addprefix $(BUILD_DIR)/, $(notdir $(VIDEO_CODEC_SRC:.cpp=.o
 SENDER_OBJS = $(addprefix $(BUILD_DIR)/, $(SENDER_SRC:.cpp=.o))
 RECEIVER_OBJS = $(addprefix $(BUILD_DIR)/, $(RECEIVER_SRC:.cpp=.o))
 VIDEO_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VIDEO_STREAMING_SRC:.cpp=.o))
+VOICE_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VOICE_STREAMING_SRC:.cpp=.o))
 MULTI_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(MULTI_STREAMING_SRC:.cpp=.o))
 
 # ============================================
@@ -69,13 +77,14 @@ MULTI_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(MULTI_STREAMING_SRC:.cpp=.o)
 SENDER_EXE = $(BUILD_DIR)/sender_demo
 RECEIVER_EXE = $(BUILD_DIR)/receiver_demo
 VIDEO_STREAMING_EXE = $(BUILD_DIR)/video_streaming_demo
+VOICE_STREAMING_EXE = $(BUILD_DIR)/voice_demo
 MULTI_STREAMING_EXE = $(BUILD_DIR)/multi_streaming_demo
 
 # ============================================
 # 默认目标
 # ============================================
 .PHONY: all
-all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE) $(MULTI_STREAMING_EXE)
+all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE) $(VOICE_STREAMING_EXE) $(MULTI_STREAMING_EXE)
 	@echo ""
 	@echo "=========================================="
 	@echo "编译完成！"
@@ -85,6 +94,8 @@ all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE
 	@echo "  接收端: $(RECEIVER_EXE)"
 	@echo "视频传输:"
 	@echo "  收发端: $(VIDEO_STREAMING_EXE)"
+	@echo "语音传输:"
+	@echo "  收发端: $(VOICE_STREAMING_EXE)"
 	@echo "多数据流传输:"
 	@echo "  统一入口: $(MULTI_STREAMING_EXE)"
 	@echo "=========================================="
@@ -157,6 +168,34 @@ $(BUILD_DIR)/video_reader.o: VideoCodec/video_reader.cpp VideoCodec/video_reader
 
 $(BUILD_DIR)/video_writer.o: VideoCodec/video_writer.cpp VideoCodec/video_writer.h VideoCodec/video_codec.h
 	@echo "编译 video_writer.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# 语音传输 - 编译规则
+# ============================================
+$(VOICE_STREAMING_EXE): $(VOICE_STREAMING_OBJS) $(VOICE_CODEC_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB)
+	@echo "链接语音传输程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+	@echo "✓ 语音传输程序编译完成"
+
+$(BUILD_DIR)/voice_demo.o: voice_demo.cpp voice_transmitter.h voice_receiver.h
+	@echo "编译 voice_demo.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/voice_transmitter.o: voice_transmitter.cpp voice_transmitter.h data_common.h
+	@echo "编译 voice_transmitter.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/voice_receiver.o: voice_receiver.cpp voice_receiver.h data_common.h
+	@echo "编译 voice_receiver.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/voice_codec.o: VoiceCodec/voice_codec.cpp VoiceCodec/voice_codec.h
+	@echo "编译 voice_codec.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/voice_reader.o: VoiceCodec/voice_reader.cpp VoiceCodec/voice_reader.h
+	@echo "编译 voice_reader.cpp..."
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # ============================================
@@ -245,7 +284,8 @@ distclean: clean
 	@$(MAKE) -C pack clean
 	@$(MAKE) -C network clean
 	@$(MAKE) -C event_base clean
-	@$(MAKE) -C VideoCodec clean
+	@$(MAKE) -C VideoCodec clean 2>/dev/null || true
+	@$(MAKE) -C VoiceCodec clean 2>/dev/null || true
 	@echo "✓ 深度清理完成"
 
 # ============================================
@@ -268,6 +308,10 @@ help:
 	@echo "  终端1: make run-video-receiver"
 	@echo "  终端2: make run-video-sender"
 	@echo ""
+	@echo "语音传输测试:"
+	@echo "  终端1: ./build/voice_demo receive 9004 output/voice/received.wav"
+	@echo "  终端2: ./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav"
+	@echo ""
 	@echo "多数据流传输:"
 	@echo "  视频:    ./build/multi_streaming_demo receiver video 9001 output.mp4"
 	@echo "           ./build/multi_streaming_demo sender video 127.0.0.1 9001 input.mp4"
@@ -277,14 +321,17 @@ help:
 	@echo "           ./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 test"
 	@echo "  栅格:    ./build/multi_streaming_demo receiver gridmap 9003"
 	@echo "           ./build/multi_streaming_demo sender gridmap 127.0.0.1 9003 test"
+	@echo "  语音:    ./build/voice_demo receive 9004 output/voice/received.wav"
+	@echo "           ./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav"
 
 # ============================================
 # 单独编译目标
 # ============================================
-.PHONY: sender receiver video multi
+.PHONY: sender receiver video voice multi
 sender: check-deps $(BUILD_DIR) $(SENDER_EXE)
 receiver: check-deps $(BUILD_DIR) $(RECEIVER_EXE)
 video: check-deps $(BUILD_DIR) $(VIDEO_STREAMING_EXE)
+voice: check-deps $(BUILD_DIR) $(VOICE_STREAMING_EXE)
 multi: check-deps $(BUILD_DIR) $(MULTI_STREAMING_EXE)
 
 # ============================================

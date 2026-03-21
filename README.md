@@ -228,15 +228,23 @@ make distclean
 ## 目录结构
 
 ```
-src_new/
 ├── Makefile                 # 主 Makefile
 ├── README.md               # 本文件
-├── test.sh                 # 测试脚本
-├── common.h                # 公共头文件（PacketHeader）
+├── TODO.md                 # 待办事项
+├── data_common.h           # 数据类型公共定义
 ├── sender.h/cpp            # 发送器实现
 ├── sender_demo.cpp         # 发送端 demo
 ├── receiver.h/cpp          # 接收器实现
 ├── receiver_demo.cpp       # 接收端 demo
+├── video_transmitter.h/cpp # 视频传输发送器
+├── video_receiver.h/cpp    # 视频传输接收器
+├── voice_transmitter.h/cpp # 语音传输发送器
+├── voice_receiver.h/cpp    # 语音传输接收器
+├── voice_demo.cpp          # 语音传输演示
+├── fc_control.h/cpp        # 飞控指令模块
+├── point_cloud.h/cpp       # 点云传输模块
+├── grid_map.h/cpp          # 栅格地图模块
+├── multi_streaming_demo.cpp # 多数据流统一入口
 ├── event_base/            # 事件循环模块
 │   ├── event_loop.h/cpp
 │   ├── event_queue.h
@@ -248,9 +256,17 @@ src_new/
 ├── pack/                  # RaptorQ 封装
 │   ├── rq_pack.h/cpp
 │   └── Makefile
+├── VideoCodec/            # 视频编解码
+│   ├── video_reader.h/cpp
+│   └── video_writer.h/cpp
+├── VoiceCodec/            # 语音编解码
+│   └── voice_codec.h/cpp
 └── build/                 # 编译输出
-    ├── sender_demo        # 发送端可执行文件
-    └── receiver_demo      # 接收端可执行文件
+    ├── sender_demo        # 基础发送端
+    ├── receiver_demo      # 基础接收端
+    ├── video_streaming_demo  # 视频传输
+    ├── voice_demo         # 语音传输
+    └── multi_streaming_demo  # 多数据流
 ```
 
 ## 故障排查
@@ -394,16 +410,59 @@ struct FrameTransmitParams {
 - 乱序帧缓存（最多 100 帧）
 - 过期帧自动丢弃
 
+## 语音传输功能
+
+基于 RaptorQ FEC 的语音文件传输，支持 WAV/PCM 格式音频文件。
+
+### 特性
+
+- **文件传输**: 从 WAV/PCM 文件读取音频，传输后保存为 WAV 文件
+- **实时发送**: 按 20ms 帧间隔发送（可调整速度）
+- **保序写入**: 接收端缓存乱序帧，按序写入文件
+- **低冗余**: 5% FEC 冗余，容忍轻度丢包
+
+### 端口和参数
+
+| 参数 | 值 |
+|------|-----|
+| 端口 | 9004 |
+| 采样率 | 8000 Hz |
+| 位深 | 16 bit |
+| 声道 | 单声道 |
+| 帧间隔 | 20 ms |
+| 符号大小 | 256 bytes |
+| FEC 冗余 | 5% |
+
+### 快速开始
+
+```bash
+# 生成测试音频（10秒，1kHz正弦波）
+./build/generate_voice_test data/voice/test.wav 10
+
+# 终端1 - 启动接收端
+./build/voice_demo receive 9004 output/voice/received.wav
+
+# 终端2 - 启动发送端
+./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav
+
+# 传输完成后检查输出文件
+ls -la output/voice/
+file output/voice/received.wav
+```
+
+---
+
 ## 多数据流传输（统一入口）
 
-一个可执行文件管理四种数据类型的传输，端口分配如下：
+一个可执行文件管理五种数据类型的传输，端口分配如下：
 
 | 数据类型 | 端口 | FEC策略 | 特性 |
 |---------|------|---------|------|
 | 飞控指令 | 9000 | 50%冗余，50ms超时 | 终端实时交互 |
 | 视频流 | 9001 | I帧50%/P帧30%冗余 | H.264 NAL直通 |
-| 点云 | 9002 | 10%冗余，8192B符号 | Livox CustomMsg格式 |
-| 栅格地图 | 9003 | 20%冗余，4096B符号 | Eigen::Vector3d格式 |
+| 点云 | 9002 | 10%冗余，1024B符号 | Livox CustomMsg格式 |
+| 栅格地图 | 9003 | 20%冗余，1024B符号 | Eigen::Vector3d格式 |
+| 语音 | 9004 | 5%冗余，256B符号 | 8kHz PCM实时传输 |
 
 ### 使用方法
 
@@ -455,6 +514,19 @@ struct FrameTransmitParams {
 ./build/multi_streaming_demo sender video 127.0.0.1 9001 input.mp4
 ```
 
+**语音传输（独立程序）**
+```bash
+# 终端1 - 接收端
+./build/voice_demo receive 9004 output/voice/received.wav
+
+# 终端2 - 发送端
+./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav
+
+# 或生成测试音频后传输
+./build/generate_voice_test data/voice/test.wav 5
+./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav
+```
+
 ### 目录结构
 
 ```
@@ -462,13 +534,15 @@ data/                      # 输入文件目录
 ├── videos/
 ├── fc/
 ├── pointcloud/
-└── gridmap/
+├── gridmap/
+└── voice/                 # 语音样例数据
 
 output/                    # 输出文件目录
 ├── videos/
 ├── fc/                    # 飞控指令日志
 ├── pointcloud/            # 接收的点云PCD文件
-└── gridmap/               # 接收的栅格地图文件
+├── gridmap/               # 接收的栅格地图文件
+└── voice/                 # 接收的语音数据
 ```
 
 ### 生成样例数据
