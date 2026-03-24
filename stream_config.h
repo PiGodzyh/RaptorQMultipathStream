@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <iostream>
 
 /**
  * 数据类型枚举

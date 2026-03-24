@@ -53,6 +53,24 @@ MULTI_STREAMING_SRC = multi_streaming_demo.cpp video_transmitter.cpp video_recei
                       fc_control.cpp point_cloud.cpp grid_map.cpp \
                       sender.cpp send_center.cpp receiver.cpp receiver_center.cpp
 
+# SendBuffer 测试 - 源文件
+SENDBUFFER_TEST_SRC = send_buffer_test.cpp send_buffer.cpp
+
+# Scheduler 测试 - 源文件
+SCHEDULER_TEST_SRC = scheduler_test.cpp scheduler.cpp send_buffer.cpp sender.cpp send_center.cpp
+
+# ReorderBuffer 测试 - 源文件
+REORDER_TEST_SRC = reorder_buffer_test.cpp reorder_buffer.cpp send_buffer.cpp
+
+# SendBuffer + ReorderBuffer 同步测试
+SYNC_TEST_SRC = test_send_receive_sync.cpp send_buffer.cpp reorder_buffer.cpp
+
+# 集成测试（真实网络）
+INTEGRATED_TEST_SRC = integrated_test.cpp send_buffer.cpp scheduler.cpp sender.cpp send_center.cpp
+
+# Feedback 模块测试
+FEEDBACK_TEST_SRC = feedback_test.cpp feedback.cpp send_buffer.cpp
+
 # ============================================
 # 子模块对象文件
 # ============================================
@@ -70,6 +88,12 @@ RECEIVER_OBJS = $(addprefix $(BUILD_DIR)/, $(RECEIVER_SRC:.cpp=.o))
 VIDEO_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VIDEO_STREAMING_SRC:.cpp=.o))
 VOICE_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VOICE_STREAMING_SRC:.cpp=.o))
 MULTI_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(MULTI_STREAMING_SRC:.cpp=.o))
+SENDBUFFER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(SENDBUFFER_TEST_SRC:.cpp=.o))
+SCHEDULER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(SCHEDULER_TEST_SRC:.cpp=.o))
+REORDER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(REORDER_TEST_SRC:.cpp=.o))
+SYNC_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(SYNC_TEST_SRC:.cpp=.o))
+INTEGRATED_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(INTEGRATED_TEST_SRC:.cpp=.o))
+FEEDBACK_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(FEEDBACK_TEST_SRC:.cpp=.o))
 
 # ============================================
 # 可执行文件
@@ -79,12 +103,18 @@ RECEIVER_EXE = $(BUILD_DIR)/receiver_demo
 VIDEO_STREAMING_EXE = $(BUILD_DIR)/video_streaming_demo
 VOICE_STREAMING_EXE = $(BUILD_DIR)/voice_demo
 MULTI_STREAMING_EXE = $(BUILD_DIR)/multi_streaming_demo
+SENDBUFFER_TEST_EXE = $(BUILD_DIR)/send_buffer_test
+SCHEDULER_TEST_EXE = $(BUILD_DIR)/scheduler_test
+REORDER_TEST_EXE = $(BUILD_DIR)/reorder_buffer_test
+SYNC_TEST_EXE = $(BUILD_DIR)/test_sync
+INTEGRATED_TEST_EXE = $(BUILD_DIR)/integrated_test
+FEEDBACK_TEST_EXE = $(BUILD_DIR)/feedback_test
 
 # ============================================
 # 默认目标
 # ============================================
 .PHONY: all
-all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE) $(VOICE_STREAMING_EXE) $(MULTI_STREAMING_EXE)
+all: check-deps $(BUILD_DIR) $(SENDER_EXE) $(RECEIVER_EXE) $(VIDEO_STREAMING_EXE) $(VOICE_STREAMING_EXE) $(MULTI_STREAMING_EXE) $(SENDBUFFER_TEST_EXE) $(SCHEDULER_TEST_EXE) $(REORDER_TEST_EXE) $(SYNC_TEST_EXE) $(INTEGRATED_TEST_EXE) $(FEEDBACK_TEST_EXE)
 	@echo ""
 	@echo "=========================================="
 	@echo "编译完成！"
@@ -207,7 +237,93 @@ $(MULTI_STREAMING_EXE): $(MULTI_STREAMING_OBJS) $(VIDEO_CODEC_OBJS) $(NETWORK_OB
 	@echo "✓ 多数据流传输程序编译完成"
 
 $(BUILD_DIR)/multi_streaming_demo.o: multi_streaming_demo.cpp data_common.h video_transmitter.h video_receiver.h fc_control.h point_cloud.h grid_map.h
-	@echo "编译 multi_streaming_demo.cpp..."
+
+# ============================================
+# SendBuffer 测试 - 编译规则
+# ============================================
+$(SENDBUFFER_TEST_EXE): $(SENDBUFFER_TEST_OBJS)
+	@echo "链接 SendBuffer 测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+	@echo "✓ SendBuffer 测试程序编译完成"
+
+$(BUILD_DIR)/send_buffer_test.o: send_buffer_test.cpp send_buffer.h stream_config.h
+	@echo "编译 send_buffer_test.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/send_buffer.o: send_buffer.cpp send_buffer.h
+	@echo "编译 send_buffer.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# Scheduler 测试 - 编译规则
+# ============================================
+$(SCHEDULER_TEST_EXE): $(SCHEDULER_TEST_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB)
+	@echo "链接 Scheduler 测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS) -lpthread
+	@echo "✓ Scheduler 测试程序编译完成"
+
+$(BUILD_DIR)/scheduler_test.o: scheduler_test.cpp scheduler.h send_buffer.h
+	@echo "编译 scheduler_test.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/scheduler.o: scheduler.cpp scheduler.h
+	@echo "编译 scheduler.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# ReorderBuffer 测试 - 编译规则
+# ============================================
+$(REORDER_TEST_EXE): $(REORDER_TEST_OBJS)
+	@echo "链接 ReorderBuffer 测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+	@echo "✓ ReorderBuffer 测试程序编译完成"
+
+$(BUILD_DIR)/reorder_buffer_test.o: reorder_buffer_test.cpp reorder_buffer.h
+	@echo "编译 reorder_buffer_test.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/reorder_buffer.o: reorder_buffer.cpp reorder_buffer.h
+	@echo "编译 reorder_buffer.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# Send+Receive 同步测试 - 编译规则
+# ============================================
+$(SYNC_TEST_EXE): $(SYNC_TEST_OBJS)
+	@echo "链接 Send+Receive 同步测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+	@echo "✓ Send+Receive 同步测试程序编译完成"
+
+$(BUILD_DIR)/test_send_receive_sync.o: test_send_receive_sync.cpp send_buffer.h reorder_buffer.h
+	@echo "编译 test_send_receive_sync.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# 集成测试（真实网络）- 编译规则
+# ============================================
+$(INTEGRATED_TEST_EXE): $(INTEGRATED_TEST_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB)
+	@echo "链接集成测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS) -lpthread
+	@echo "✓ 集成测试程序编译完成"
+
+$(BUILD_DIR)/integrated_test.o: integrated_test.cpp send_buffer.h scheduler.h sender.h
+	@echo "编译 integrated_test.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# ============================================
+# Feedback 测试 - 编译规则
+# ============================================
+$(FEEDBACK_TEST_EXE): $(FEEDBACK_TEST_OBJS)
+	@echo "链接 Feedback 测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+	@echo "✓ Feedback 测试程序编译完成"
+
+$(BUILD_DIR)/feedback_test.o: feedback_test.cpp feedback.h
+	@echo "编译 feedback_test.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/feedback.o: feedback.cpp feedback.h
+	@echo "编译 feedback.cpp..."
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 $(BUILD_DIR)/fc_control.o: fc_control.cpp fc_control.h data_common.h
@@ -327,12 +443,18 @@ help:
 # ============================================
 # 单独编译目标
 # ============================================
-.PHONY: sender receiver video voice multi
+.PHONY: sender receiver video voice multi sendbuffer scheduler reorder sync integrated feedback
 sender: check-deps $(BUILD_DIR) $(SENDER_EXE)
 receiver: check-deps $(BUILD_DIR) $(RECEIVER_EXE)
 video: check-deps $(BUILD_DIR) $(VIDEO_STREAMING_EXE)
 voice: check-deps $(BUILD_DIR) $(VOICE_STREAMING_EXE)
 multi: check-deps $(BUILD_DIR) $(MULTI_STREAMING_EXE)
+sendbuffer: check-deps $(BUILD_DIR) $(SENDBUFFER_TEST_EXE)
+scheduler: check-deps $(BUILD_DIR) $(SCHEDULER_TEST_EXE)
+reorder: check-deps $(BUILD_DIR) $(REORDER_TEST_EXE)
+sync: check-deps $(BUILD_DIR) $(SYNC_TEST_EXE)
+integrated: check-deps $(BUILD_DIR) $(INTEGRATED_TEST_EXE)
+feedback: check-deps $(BUILD_DIR) $(FEEDBACK_TEST_EXE)
 
 # ============================================
 # 样例数据生成工具
@@ -355,3 +477,24 @@ $(GEN_DATA_EXE): $(GEN_DATA_OBJS) $(PACK_LIB)
 $(BUILD_DIR)/generate_sample_data.o: generate_sample_data.cpp data_common.h
 	@echo "编译 generate_sample_data.cpp..."
 	@$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# BlockPartition 测试
+BLOCK_PARTITION_TEST_SRC = block_partition_test.cpp block_partition.cpp send_buffer.cpp
+BLOCK_PARTITION_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(BLOCK_PARTITION_TEST_SRC:.cpp=.o))
+BLOCK_PARTITION_TEST_EXE = $(BUILD_DIR)/block_partition_test
+
+$(BLOCK_PARTITION_TEST_EXE): $(BLOCK_PARTITION_TEST_OBJS)
+	@echo "链接 BlockPartition 测试程序..."
+	$(CXX) $(CXXFLAGS) -o $@ $^ -lpthread
+	@echo "✓ BlockPartition 测试程序编译完成"
+
+$(BUILD_DIR)/block_partition_test.o: block_partition_test.cpp block_partition.h
+	@echo "编译 block_partition_test.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/block_partition.o: block_partition.cpp block_partition.h
+	@echo "编译 block_partition.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+.PHONY: blockpartition
+blockpartition: check-deps $(BUILD_DIR) $(BLOCK_PARTITION_TEST_EXE)
