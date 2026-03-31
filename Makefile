@@ -37,7 +37,9 @@ RECEIVER_SRC = receiver_demo.cpp receiver.cpp receiver_center.cpp
 # 视频传输 - 源文件
 # ============================================
 VIDEO_STREAMING_SRC = video_streaming_demo.cpp video_transmitter.cpp video_receiver.cpp \
-                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp
+                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp \
+                      unified_sender.cpp unified_receiver.cpp send_buffer.cpp scheduler.cpp \
+                      block_partition.cpp feedback.cpp reorder_buffer.cpp fc_control.cpp
 VIDEO_CODEC_SRC = VideoCodec/video_reader.cpp VideoCodec/video_writer.cpp
 
 # ============================================
@@ -51,7 +53,9 @@ VOICE_CODEC_SRC = VoiceCodec/voice_codec.cpp VoiceCodec/voice_reader.cpp
 # ============================================
 MULTI_STREAMING_SRC = multi_streaming_demo.cpp video_transmitter.cpp video_receiver.cpp \
                       fc_control.cpp point_cloud.cpp grid_map.cpp \
-                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp
+                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp \
+                      unified_sender.cpp unified_receiver.cpp send_buffer.cpp scheduler.cpp \
+                      block_partition.cpp feedback.cpp reorder_buffer.cpp
 
 # SendBuffer 测试 - 源文件
 SENDBUFFER_TEST_SRC = send_buffer_test.cpp send_buffer.cpp
@@ -191,6 +195,31 @@ $(BUILD_DIR)/video_receiver.o: video_receiver.cpp video_receiver.h video_common.
 	@echo "编译 video_receiver.cpp..."
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
+# UnifiedSender/Receiver 模块编译
+$(BUILD_DIR)/unified_sender.o: unified_sender.cpp unified_sender.h send_buffer.h scheduler.h block_partition.h feedback.h
+	@echo "编译 unified_sender.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/unified_receiver.o: unified_receiver.cpp unified_receiver.h reorder_buffer.h
+	@echo "编译 unified_receiver.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/send_buffer.o: send_buffer.cpp send_buffer.h
+	@echo "编译 send_buffer.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/scheduler.o: scheduler.cpp scheduler.h
+	@echo "编译 scheduler.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/block_partition.o: block_partition.cpp block_partition.h
+	@echo "编译 block_partition.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/reorder_buffer.o: reorder_buffer.cpp reorder_buffer.h
+	@echo "编译 reorder_buffer.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
 # VideoCodec 模块编译
 $(BUILD_DIR)/video_reader.o: VideoCodec/video_reader.cpp VideoCodec/video_reader.h VideoCodec/video_codec.h
 	@echo "编译 video_reader.cpp..."
@@ -237,6 +266,8 @@ $(MULTI_STREAMING_EXE): $(MULTI_STREAMING_OBJS) $(VIDEO_CODEC_OBJS) $(NETWORK_OB
 	@echo "✓ 多数据流传输程序编译完成"
 
 $(BUILD_DIR)/multi_streaming_demo.o: multi_streaming_demo.cpp data_common.h video_transmitter.h video_receiver.h fc_control.h point_cloud.h grid_map.h
+	@echo "编译 multi_streaming_demo.cpp..."
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # ============================================
 # SendBuffer 测试 - 编译规则

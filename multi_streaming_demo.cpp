@@ -38,6 +38,7 @@
 #include "fc_control.h"
 #include "point_cloud.h"
 #include "grid_map.h"
+#include "unified_sender.h"
 
 using namespace DataTransmit;
 using VideoTransmit::VideoTransmitter;
@@ -88,7 +89,7 @@ void PrintUsage(const char* program) {
 // 视频传输
 // ============================================================================
 int RunVideoReceiver(int port, const std::string& output_file) {
-    std::string output_path = GetOutputDir(DataType::VIDEO) + output_file;
+    std::string output_path = GetOutputDir(DataTransmit::DataType::VIDEO) + output_file;
     
     VideoReceiver receiver(port);
     receiver.CreateOutputFile(output_path);
@@ -118,9 +119,21 @@ int RunVideoReceiver(int port, const std::string& output_file) {
 }
 
 int RunVideoSender(const std::string& addr, int port, const std::string& input_file) {
-    std::string input_path = GetInputDir(DataType::VIDEO) + input_file;
+    std::string input_path = GetInputDir(DataTransmit::DataType::VIDEO) + input_file;
     
-    VideoTransmitter transmitter(addr, port);
+    // 创建 UnifiedSender 配置
+    UnifiedSenderConfig config;
+    config.target_ip = addr;
+    
+    // 创建 UnifiedSender
+    auto unified_sender = std::make_shared<UnifiedSender>(config);
+    if (!unified_sender->initialize()) {
+        std::cerr << "Failed to initialize UnifiedSender" << std::endl;
+        return 1;
+    }
+    unified_sender->start();
+    
+    VideoTransmitter transmitter(unified_sender);
     transmitter.OpenVideoFile(input_path);
     transmitter.Start();
     
@@ -132,6 +145,7 @@ int RunVideoSender(const std::string& addr, int port, const std::string& input_f
     }
     
     transmitter.Stop();
+    unified_sender->stop();
     std::cout << "视频发送完成" << std::endl;
     return 0;
 }
@@ -143,7 +157,7 @@ int RunFCReceiver(int port, const std::string& log_file) {
     FCControlReceiver receiver(port);
     
     if (!log_file.empty()) {
-        std::string log_path = GetOutputDir(DataType::FC_CONTROL) + log_file;
+        std::string log_path = GetOutputDir(DataTransmit::DataType::FC_CONTROL) + log_file;
         receiver.SetLogFile(log_path);
     }
     
@@ -159,12 +173,26 @@ int RunFCReceiver(int port, const std::string& log_file) {
 }
 
 int RunFCSender(const std::string& addr, int port) {
-    FCControlTransmitter transmitter(addr, port);
+    // 创建 UnifiedSender 配置
+    UnifiedSenderConfig config;
+    config.target_ip = addr;
+    
+    // 创建 UnifiedSender
+    auto unified_sender = std::make_shared<UnifiedSender>(config);
+    if (!unified_sender->initialize()) {
+        std::cerr << "Failed to initialize UnifiedSender" << std::endl;
+        return 1;
+    }
+    unified_sender->start();
+    
+    FCControlTransmitter transmitter(unified_sender);
     
     // 设置信号处理，用于优雅退出输入循环
     signal(SIGINT, SignalHandler);
     
     transmitter.Run();
+    
+    unified_sender->stop();
     return 0;
 }
 
@@ -175,7 +203,7 @@ int RunPointCloudReceiver(int port, const std::string& output_file) {
     PointCloudReceiver receiver(port);
     
     if (!output_file.empty()) {
-        std::string output_path = GetOutputDir(DataType::POINT_CLOUD) + output_file;
+        std::string output_path = GetOutputDir(DataTransmit::DataType::POINT_CLOUD) + output_file;
         receiver.SetOutputFile(output_path);
     }
     
@@ -196,12 +224,24 @@ int RunPointCloudReceiver(int port, const std::string& output_file) {
 }
 
 int RunPointCloudSender(const std::string& addr, int port, const std::string& input_file) {
-    PointCloudTransmitter transmitter(addr, port);
+    // 创建 UnifiedSender 配置
+    UnifiedSenderConfig config;
+    config.target_ip = addr;
+    
+    // 创建 UnifiedSender
+    auto unified_sender = std::make_shared<UnifiedSender>(config);
+    if (!unified_sender->initialize()) {
+        std::cerr << "Failed to initialize UnifiedSender" << std::endl;
+        return 1;
+    }
+    unified_sender->start();
+    
+    PointCloudTransmitter transmitter(unified_sender);
     
     signal(SIGINT, SignalHandler);
     
-    if (!input_file.empty() && input_file != "test") {
-        std::string input_path = GetInputDir(DataType::POINT_CLOUD) + input_file;
+    if (!input_file.empty() && input_file != "test" && input_file.find(':') == std::string::npos) {
+        std::string input_path = GetInputDir(DataTransmit::DataType::POINT_CLOUD) + input_file;
         transmitter.SendFromFile(input_path);
     } else {
         // 发送测试点云
@@ -218,6 +258,7 @@ int RunPointCloudSender(const std::string& addr, int port, const std::string& in
         transmitter.SendTestCloud(point_count, frame_count);
     }
     
+    unified_sender->stop();
     return 0;
 }
 
@@ -228,7 +269,7 @@ int RunGridMapReceiver(int port, const std::string& output_file) {
     GridMapReceiver receiver(port);
     
     if (!output_file.empty()) {
-        std::string output_path = GetOutputDir(DataType::GRID_MAP) + output_file;
+        std::string output_path = GetOutputDir(DataTransmit::DataType::GRID_MAP) + output_file;
         receiver.SetOutputFile(output_path);
     }
     
@@ -249,18 +290,31 @@ int RunGridMapReceiver(int port, const std::string& output_file) {
 }
 
 int RunGridMapSender(const std::string& addr, int port, const std::string& input_file) {
-    GridMapTransmitter transmitter(addr, port);
+    // 创建 UnifiedSender 配置
+    UnifiedSenderConfig config;
+    config.target_ip = addr;
+    
+    // 创建 UnifiedSender
+    auto unified_sender = std::make_shared<UnifiedSender>(config);
+    if (!unified_sender->initialize()) {
+        std::cerr << "Failed to initialize UnifiedSender" << std::endl;
+        return 1;
+    }
+    unified_sender->start();
+    
+    GridMapTransmitter transmitter(unified_sender);
     
     signal(SIGINT, SignalHandler);
     
     if (!input_file.empty() && input_file != "test") {
-        std::string input_path = GetInputDir(DataType::GRID_MAP) + input_file;
+        std::string input_path = GetInputDir(DataTransmit::DataType::GRID_MAP) + input_file;
         transmitter.SendFromFile(input_path);
     } else {
         // 发送测试栅格地图
         transmitter.SendTestMap(100, 100);
     }
     
+    unified_sender->stop();
     return 0;
 }
 

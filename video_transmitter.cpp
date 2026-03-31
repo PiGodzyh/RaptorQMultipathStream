@@ -11,17 +11,13 @@
 
 namespace VideoTransmit {
 
-VideoTransmitter::VideoTransmitter(const std::string& server_addr, 
-                                   uint16_t server_port,
-                                   uint32_t encode_threads)
+VideoTransmitter::VideoTransmitter(std::shared_ptr<UnifiedSender> unified_sender)
     : video_reader_(std::make_unique<VideoCodec::VideoReader>())
     , video_opened_(false)
-    , sender_(std::make_unique<Sender>(server_addr, server_port, 2048, encode_threads))
-    , server_addr_(server_addr)
-    , server_port_(server_port)
+    , unified_sender_(unified_sender)
     , running_(false)
     , send_thread_running_(false)
-    , frame_seq_counter_(0)
+    , frame_seq_counter_(1)  // 从1开始，0保留给配置包
     , gop_counter_(0)
     , block_id_counter_(1)  // 从1开始，0保留给配置
     , current_gop_id_(0)
@@ -73,16 +69,18 @@ void VideoTransmitter::Start() {
         return;
     }
     
+    if (!unified_sender_) {
+        ReportError("UnifiedSender not set");
+        return;
+    }
+    
     running_ = true;
     send_thread_running_ = true;
-    
-    // 启动发送器
-    sender_->start();
     
     // 启动发送线程
     send_thread_ = std::thread(&VideoTransmitter::SendThreadFunc, this);
     
-    std::cout << "VideoTransmitter: Started" << std::endl;
+    std::cout << "VideoTransmitter: Started (using UnifiedSender)" << std::endl;
 }
 
 void VideoTransmitter::Stop() {
@@ -98,8 +96,7 @@ void VideoTransmitter::Stop() {
         send_thread_.join();
     }
     
-    // 停止发送器
-    sender_->stop();
+    // 注意：UnifiedSender 由外部管理，不在此停止
     
     std::cout << "VideoTransmitter: Stopped" << std::endl;
 }
@@ -151,6 +148,9 @@ void VideoTransmitter::SendThreadFunc() {
             continue;
         }
         
+        // 发送间隔控制 10ms
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        
         // GOP管理
         if (frame.is_key_frame) {
             current_gop_id_++;
@@ -192,27 +192,11 @@ bool VideoTransmitter::SendVideoConfig() {
     memcpy(packet_data.data(), &header, sizeof(VideoFrameHeader));
     memcpy(packet_data.data() + sizeof(VideoFrameHeader), config_data.data(), config_data.size());
     
-    // 使用RaptorQ编码并直接发送
-    auto params = FrameTransmitParams::IFrameParams();
-    params.repair_ratio = 1.0f;  // 100%冗余
-    params.symbol_size = 1024;
+    // 使用 UnifiedSender 发送（内部会自动进行 RaptorQ 编码）
+    // stream_id = 0 保留给配置包
+    unified_sender_->send(DataPriority::VIDEO, 0, packet_data);
     
-    // 创建RaptorQ编码器
-    RQPack::Encoder encoder(packet_data.data(), packet_data.size(), params.symbol_size);
-    if (!encoder.isReady()) {
-        return false;
-    }
-    
-    uint32_t source_symbols = encoder.getSourceSymbolCount();
-    uint32_t repair_symbols = static_cast<uint32_t>(source_symbols * params.repair_ratio);
-    auto symbols = encoder.encodeAll(repair_symbols);
-    
-    // 使用Sender发送预编码的符号（避免双重编码）
-    uint32_t block_id = 0;  // 配置用block_id = 0
-    sender_->sendSymbols(block_id, symbols, packet_data.size(), params.symbol_size);
-    
-    std::cout << "VideoTransmitter: Sent video config (" << packet_data.size() << " bytes, " 
-              << symbols.size() << " symbols)" << std::endl;
+    std::cout << "VideoTransmitter: Sent video config (" << packet_data.size() << " bytes)" << std::endl;
     
     // 等待配置发送完成
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -239,50 +223,34 @@ bool VideoTransmitter::SendFrame(const VideoCodec::EncodedFrame& frame) {
             frame_type = frame.is_key_frame ? FrameType::I_FRAME : FrameType::P_FRAME;
     }
     
-    // 获取传输参数
-    auto params = GetTransmitParams(frame_type);
-    
     // 构建帧数据
     auto frame_data = BuildFrameData(frame, frame_seq);
     
-    // 创建RaptorQ编码器
-    RQPack::Encoder encoder(frame_data.data(), frame_data.size(), params.symbol_size);
-    if (!encoder.isReady()) {
-        return false;
-    }
-    
-    uint32_t source_symbols = encoder.getSourceSymbolCount();
-    uint32_t repair_symbols = static_cast<uint32_t>(source_symbols * params.repair_ratio);
-    auto symbols = encoder.encodeAll(repair_symbols);
-    
-    // Source Block ID
+    // Source Block ID（从1开始，0保留给配置）
     uint32_t block_id = block_id_counter_++;
     
-    // 使用Sender发送预编码的符号（避免双重编码）
-    // 设置发送间隔
-    sender_->setSendInterval(params.send_interval_us);
+    // 使用 UnifiedSender 发送（内部会自动进行 RaptorQ 编码和调度）
+    unified_sender_->send(DataPriority::VIDEO, block_id, frame_data);
     
-    // 发送符号
-    bool sent = sender_->sendSymbols(block_id, symbols, frame_data.size(), params.symbol_size);
-    uint32_t symbols_sent = sent ? symbols.size() : 0;
-    
-    // 更新统计
-    UpdateStats(frame_type, frame_data.size(), symbols_sent);
+    // 更新统计（符号数估算）
+    auto params = GetTransmitParams(frame_type);
+    uint32_t est_source_symbols = (frame_data.size() + params.symbol_size - 1) / params.symbol_size;
+    uint32_t est_total_symbols = static_cast<uint32_t>(est_source_symbols * (1 + params.repair_ratio));
+    UpdateStats(frame_type, frame_data.size(), est_total_symbols);
     
     // 回调
     if (send_callback_) {
-        send_callback_(frame_seq, frame_type, frame_data.size(), symbols_sent == symbols.size());
+        send_callback_(frame_seq, frame_type, frame_data.size(), true);
     }
     
     // 打印进度
     if (frame_seq % 30 == 0) {
         std::cout << "VideoTransmitter: Sent frame " << frame_seq 
                   << " (" << VideoCodec::FrameTypeToString(static_cast<VideoCodec::FrameType>(frame.type))
-                  << ", " << frame.data.size() << " bytes, " 
-                  << symbols_sent << "/" << symbols.size() << " symbols)" << std::endl;
+                  << ", " << frame.data.size() << " bytes)" << std::endl;
     }
     
-    return symbols_sent > 0;
+    return true;
 }
 
 std::vector<uint8_t> VideoTransmitter::BuildFrameData(const VideoCodec::EncodedFrame& frame,

@@ -12,7 +12,7 @@
 #define FC_CONTROL_H
 
 #include "data_common.h"
-#include "sender.h"
+#include "unified_sender.h"
 #include "receiver.h"
 #include <atomic>
 #include <thread>
@@ -26,7 +26,7 @@ namespace DataTransmit {
 // ============================================================================
 class FCControlTransmitter {
 public:
-    FCControlTransmitter(const std::string& server_addr, int server_port);
+    FCControlTransmitter(std::shared_ptr<UnifiedSender> unified_sender);
     ~FCControlTransmitter();
     
     // 启动发送（阻塞，读取终端输入直到输入 "quit"）
@@ -42,13 +42,12 @@ private:
     // 发送单帧
     bool SendFrame(const FCControlPacket& packet, uint32_t seq);
     
-    std::unique_ptr<Sender> sender_;
+    std::shared_ptr<UnifiedSender> unified_sender_;
     std::atomic<uint32_t> seq_counter_{0};
     std::atomic<bool> running_{false};
     std::thread input_thread_;
     std::mutex send_mutex_;
-    std::string server_addr_;
-    int server_port_;
+
 };
 
 // ============================================================================

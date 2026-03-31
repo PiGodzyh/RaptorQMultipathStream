@@ -3,7 +3,6 @@
  */
 
 #include "fc_control.h"
-#include "pack/rq_pack.h"
 #include <iostream>
 #include <cstring>
 #include <chrono>
@@ -15,10 +14,8 @@ namespace DataTransmit {
 // FCControlTransmitter 实现
 // ============================================================================
 
-FCControlTransmitter::FCControlTransmitter(const std::string& server_addr, int server_port)
-    : sender_(std::make_unique<Sender>(server_addr, server_port, 512, 1))
-    , server_addr_(server_addr)
-    , server_port_(server_port) {
+FCControlTransmitter::FCControlTransmitter(std::shared_ptr<UnifiedSender> unified_sender)
+    : unified_sender_(unified_sender), seq_counter_(0), running_(false) {
 }
 
 FCControlTransmitter::~FCControlTransmitter() {
@@ -27,7 +24,6 @@ FCControlTransmitter::~FCControlTransmitter() {
 
 void FCControlTransmitter::Run() {
     running_ = true;
-    sender_->start();
     
     std::cout << "========================================" << std::endl;
     std::cout << "   飞控指令发送端" << std::endl;
@@ -75,7 +71,6 @@ void FCControlTransmitter::Run() {
 
 void FCControlTransmitter::Stop() {
     running_ = false;
-    sender_->stop();
 }
 
 bool FCControlTransmitter::SendCommand(const std::string& command, uint8_t priority) {
@@ -102,17 +97,9 @@ bool FCControlTransmitter::SendFrame(const FCControlPacket& packet, uint32_t seq
     memcpy(data.data(), &header, sizeof(FCControlHeader));
     memcpy(data.data() + sizeof(FCControlHeader), packet.command.c_str(), packet.command.length());
     
-    // FEC编码 - 50%冗余
-    FECParams fec = FECParams::FCParams();
-    RQPack::Encoder encoder(data.data(), data.size(), fec.symbol_size);
-    
-    uint32_t source_count = encoder.getSourceSymbolCount();
-    uint32_t repair_count = static_cast<uint32_t>(source_count * fec.redundancy_ratio);
-    auto symbols = encoder.encodeAll(repair_count);
-    
-    // 发送符号
+    // 使用 UnifiedSender 发送（内部会自动进行 RaptorQ 编码）
     uint32_t stream_id = seq + 1;  // stream_id从1开始，0保留
-    return sender_->sendSymbols(stream_id, symbols, data.size(), fec.symbol_size);
+    return unified_sender_->send(DataPriority::FC_COMMAND, stream_id, data);
 }
 
 // ============================================================================
@@ -161,6 +148,7 @@ void FCControlReceiver::SetLogFile(const std::string& log_path) {
 void FCControlReceiver::OnDecodeComplete(uint32_t stream_id, 
                                         const std::vector<uint8_t>& data) {
     if (data.size() < sizeof(FCControlHeader)) {
+        std::cerr << "[FC] 数据包过小: " << data.size() << " < " << sizeof(FCControlHeader) << std::endl;
         return;
     }
     
@@ -168,16 +156,45 @@ void FCControlReceiver::OnDecodeComplete(uint32_t stream_id,
     FCControlHeader header;
     memcpy(&header, data.data(), sizeof(FCControlHeader));
     
-    // 解析指令
+    // 检查 cmd_len 是否合法
+    size_t cmd_data_size = data.size() - sizeof(FCControlHeader);
+    if (header.cmd_len > cmd_data_size || header.cmd_len > 1024) {
+        std::cerr << "[FC] 非法的 cmd_len: " << header.cmd_len << ", 可用空间: " << cmd_data_size << std::endl;
+        return;
+    }
+    
+    // 解析指令（确保只读取 cmd_len 字节）
     std::string command(
         reinterpret_cast<const char*>(data.data() + sizeof(FCControlHeader)),
         header.cmd_len
     );
     
-    // 计算延迟
+    // 过滤不可打印字符，防止乱码
+    for (auto& c : command) {
+        if (c < 32 || c > 126) {
+            c = '?';
+        }
+    }
+    
+    // 计算延迟（增加有效性检查）
     uint64_t now = GetCurrentTimestampUs();
-    int64_t delay_us = now - header.timestamp;
-    double delay_ms = delay_us / 1000.0;
+    double delay_ms = 0.0;
+    
+    // DEBUG: 输出原始时间戳值
+    static bool debug_once = true;
+    if (debug_once) {
+        std::cerr << "[DEBUG] header.timestamp=" << header.timestamp 
+                  << ", now=" << now 
+                  << ", data.size=" << data.size() << std::endl;
+        debug_once = false;
+    }
+    
+    if (header.timestamp > 0 && header.timestamp <= now) {
+        delay_ms = (now - header.timestamp) / 1000.0;
+    } else if (header.timestamp > now) {
+        // 时间戳来自未来（时钟不同步），显示为负值
+        delay_ms = -(static_cast<double>(header.timestamp - now) / 1000.0);
+    }
     
     received_count_++;
     

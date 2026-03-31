@@ -18,16 +18,10 @@ bool BlockPartition::addFrame(DataPriority priority, uint64_t stream_id,
     
     if (data_size > policy_.max_block_size) {
         splitLargeFrame(frame);
-    } else if (data_size < policy_.min_block_size) {
-        if (!tryAggregateFrame(frame)) {
-            createSingleBlock(frame);
-        }
     } else {
+        // 所有小于 max_block_size 的帧都直接发送，不做聚合等待
+        // 聚合会导致延迟，对实时数据不利
         createSingleBlock(frame);
-    }
-    
-    if (needFlush()) {
-        createAggregatedBlock();
     }
     
     return true;
@@ -142,20 +136,27 @@ void BlockPartition::createAggregatedBlock() {
     block.total_blocks = 1;
     block.block_index = 0;
     
-    size_t total_size = 0;
-    for (const auto& frame : pending_frames_) {
-        total_size += sizeof(uint32_t) + frame.data->size();
-    }
-    
-    block.data.reserve(total_size);
-    
-    for (const auto& frame : pending_frames_) {
-        uint32_t size = frame.data->size();
-        block.data.push_back((size >> 24) & 0xFF);
-        block.data.push_back((size >> 16) & 0xFF);
-        block.data.push_back((size >> 8) & 0xFF);
-        block.data.push_back(size & 0xFF);
-        block.data.insert(block.data.end(), frame.data->begin(), frame.data->end());
+    // 单帧情况：直接传递原始数据，不添加长度前缀（保持向后兼容）
+    if (pending_frames_.size() == 1) {
+        const auto& frame = pending_frames_.front();
+        block.data.assign(frame.data->begin(), frame.data->end());
+    } else {
+        // 多帧情况：添加 4 字节长度前缀 + 数据的格式
+        size_t total_size = 0;
+        for (const auto& frame : pending_frames_) {
+            total_size += sizeof(uint32_t) + frame.data->size();
+        }
+        
+        block.data.reserve(total_size);
+        
+        for (const auto& frame : pending_frames_) {
+            uint32_t size = frame.data->size();
+            block.data.push_back((size >> 24) & 0xFF);
+            block.data.push_back((size >> 16) & 0xFF);
+            block.data.push_back((size >> 8) & 0xFF);
+            block.data.push_back(size & 0xFF);
+            block.data.insert(block.data.end(), frame.data->begin(), frame.data->end());
+        }
     }
     
     {
@@ -169,8 +170,12 @@ void BlockPartition::createAggregatedBlock() {
         stats_.total_blocks_out++;
     }
     
-    std::cout << "[BlockPartition] Aggregated " 
-              << pending_frames_.size() << " frames (" << total_size << " bytes)" << std::endl;
+    if (pending_frames_.size() == 1) {
+        std::cout << "[BlockPartition] Single frame (" << block.data.size() << " bytes)" << std::endl;
+    } else {
+        std::cout << "[BlockPartition] Aggregated " 
+                  << pending_frames_.size() << " frames (" << block.data.size() << " bytes)" << std::endl;
+    }
     
     pending_frames_.clear();
 }

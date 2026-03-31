@@ -3,7 +3,6 @@
  */
 
 #include "point_cloud.h"
-#include "pack/rq_pack.h"
 #include <iostream>
 #include <cstring>
 #include <sstream>
@@ -94,9 +93,8 @@ void PointCloudReader::GenerateTestCloud(std::vector<PointCloudPoint>& points,
 // PointCloudTransmitter 实现
 // ============================================================================
 
-PointCloudTransmitter::PointCloudTransmitter(const std::string& server_addr, 
-                                              int server_port)
-    : sender_(std::make_unique<Sender>(server_addr, server_port, 8192, 2)) {
+PointCloudTransmitter::PointCloudTransmitter(std::shared_ptr<UnifiedSender> unified_sender)
+    : unified_sender_(unified_sender), running_(true) {
 }
 
 PointCloudTransmitter::~PointCloudTransmitter() {
@@ -116,7 +114,6 @@ bool PointCloudTransmitter::SendFromFile(const std::string& filepath) {
     uint32_t total_frames = (points.size() + points_per_frame - 1) / points_per_frame;
     
     running_ = true;
-    sender_->start();
     
     std::cout << "开始发送点云: " << points.size() << " 点, " 
               << total_frames << " 帧" << std::endl;
@@ -149,7 +146,6 @@ bool PointCloudTransmitter::SendFromFile(const std::string& filepath) {
 
 void PointCloudTransmitter::SendTestCloud(uint32_t point_count, uint32_t frame_count) {
     running_ = true;
-    sender_->start();
     
     std::cout << "发送测试点云: " << point_count << " 点/帧, " 
               << frame_count << " 帧" << std::endl;
@@ -192,7 +188,6 @@ void PointCloudTransmitter::SendTestCloud(uint32_t point_count, uint32_t frame_c
 
 void PointCloudTransmitter::Stop() {
     running_ = false;
-    sender_->stop();
 }
 
 bool PointCloudTransmitter::SendFrame(const PointCloudFrame& frame, uint32_t frame_seq) {
@@ -209,17 +204,8 @@ bool PointCloudTransmitter::SendFrame(const PointCloudFrame& frame, uint32_t fra
            frame.points.data(), 
            frame.points.size() * sizeof(PointCloudPoint));
     
-    // FEC编码 - 10%冗余
-    FECParams fec = FECParams::PointCloudParams();
-    RQPack::Encoder encoder(data.data(), data.size(), fec.symbol_size);
-    
-    uint32_t source_count = encoder.getSourceSymbolCount();
-    uint32_t repair_count = static_cast<uint32_t>(source_count * fec.redundancy_ratio);
-    auto symbols = encoder.encodeAll(repair_count);
-    
-    // 发送符号
     uint32_t stream_id = frame_seq + 1;
-    return sender_->sendSymbols(stream_id, symbols, data.size(), fec.symbol_size);
+    return unified_sender_->send(DataPriority::POINT_CLOUD, stream_id, data);
 }
 
 // ============================================================================

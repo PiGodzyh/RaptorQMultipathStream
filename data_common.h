@@ -56,6 +56,7 @@ struct FECParams {
 // ============================================================================
 // 飞控指令数据格式
 // ============================================================================
+#pragma pack(push, 1)
 struct FCControlHeader {
     uint64_t timestamp;        // 发送时间戳（微秒）
     uint32_t seq;              // 指令序号
@@ -67,6 +68,7 @@ struct FCControlHeader {
     static constexpr uint8_t PRIORITY_NORMAL = 128;
     static constexpr uint8_t PRIORITY_LOW = 0;
 };
+#pragma pack(pop)
 
 // 飞控指令包：Header + 指令字符串
 struct FCControlPacket {

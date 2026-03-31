@@ -12,7 +12,7 @@
 #define GRID_MAP_H
 
 #include "data_common.h"
-#include "sender.h"
+#include "unified_sender.h"
 #include "receiver.h"
 #include <atomic>
 #include <thread>
@@ -37,7 +37,7 @@ public:
 // ============================================================================
 class GridMapTransmitter {
 public:
-    GridMapTransmitter(const std::string& server_addr, int server_port);
+    GridMapTransmitter(std::shared_ptr<UnifiedSender> unified_sender);
     ~GridMapTransmitter();
     
     // 从文件发送栅格地图
@@ -53,7 +53,7 @@ private:
     // 发送单帧（支持分块）
     bool SendFrame(const GridMapFrame& frame, uint32_t frame_seq);
     
-    std::unique_ptr<Sender> sender_;
+    std::shared_ptr<UnifiedSender> unified_sender_;
     std::atomic<bool> running_{false};
     std::atomic<uint32_t> frame_counter_{0};
     std::mutex send_mutex_;

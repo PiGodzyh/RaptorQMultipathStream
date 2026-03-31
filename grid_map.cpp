@@ -73,8 +73,8 @@ void GridMapReader::GenerateTestMap(GridMapFrame& frame, uint32_t width, uint32_
 // GridMapTransmitter 实现
 // ============================================================================
 
-GridMapTransmitter::GridMapTransmitter(const std::string& server_addr, int server_port)
-    : sender_(std::make_unique<Sender>(server_addr, server_port, 4096, 2)) {
+GridMapTransmitter::GridMapTransmitter(std::shared_ptr<UnifiedSender> unified_sender)
+    : unified_sender_(unified_sender), running_(true) {
 }
 
 GridMapTransmitter::~GridMapTransmitter() {
@@ -89,9 +89,6 @@ bool GridMapTransmitter::SendFromFile(const std::string& filepath) {
         return false;
     }
     
-    running_ = true;
-    sender_->start();
-    
     std::cout << "开始发送栅格地图..." << std::endl;
     
     bool result = SendFrame(frame, 0);
@@ -104,9 +101,6 @@ void GridMapTransmitter::SendTestMap(uint32_t width, uint32_t height) {
     GridMapFrame frame;
     GridMapReader reader;
     reader.GenerateTestMap(frame, width, height);
-    
-    running_ = true;
-    sender_->start();
     
     std::cout << "发送测试栅格地图: " << width << "x" << height << std::endl;
     
@@ -137,8 +131,7 @@ void GridMapTransmitter::SendTestMap(uint32_t width, uint32_t height) {
 }
 
 void GridMapTransmitter::Stop() {
-    running_ = false;
-    sender_->stop();
+    // UnifiedSender lifecycle is managed externally
 }
 
 bool GridMapTransmitter::SendFrame(const GridMapFrame& frame, uint32_t frame_seq) {
@@ -152,17 +145,8 @@ bool GridMapTransmitter::SendFrame(const GridMapFrame& frame, uint32_t frame_seq
     memcpy(data.data(), &frame.header, sizeof(GridMapHeader));
     memcpy(data.data() + sizeof(GridMapHeader), frame.data.data(), frame.data.size());
     
-    // FEC编码 - 20%冗余
-    FECParams fec = FECParams::GridMapParams();
-    RQPack::Encoder encoder(data.data(), data.size(), fec.symbol_size);
-    
-    uint32_t source_count = encoder.getSourceSymbolCount();
-    uint32_t repair_count = static_cast<uint32_t>(source_count * fec.redundancy_ratio);
-    auto symbols = encoder.encodeAll(repair_count);
-    
-    // 发送符号
     uint32_t stream_id = frame_seq + 1;
-    return sender_->sendSymbols(stream_id, symbols, data.size(), fec.symbol_size);
+    return unified_sender_->send(DataPriority::GRID_MAP, stream_id, data);
 }
 
 // ============================================================================
@@ -219,7 +203,11 @@ void GridMapReceiver::OnDecodeComplete(uint32_t stream_id,
     size_t actual_size = data.size() - sizeof(GridMapHeader);
     
     if (actual_size < expected_size) {
-        std::cerr << "栅格地图数据大小不匹配" << std::endl;
+        std::cerr << "栅格地图数据大小不匹配: 期望=" << expected_size 
+                  << " (" << frame.header.width << "x" << frame.header.height 
+                  << "), 实际=" << actual_size 
+                  << ", 数据总大小=" << data.size() 
+                  << ", 头大小=" << sizeof(GridMapHeader) << std::endl;
         return;
     }
     

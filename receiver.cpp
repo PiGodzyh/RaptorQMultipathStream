@@ -49,7 +49,11 @@ void Receiver::start() {
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
   
   // 启动网络服务器（非阻塞版本）
-  server_.startAsync();
+  if (!server_.startAsync()) {
+      std::cerr << "Receiver: 无法启动网络服务器" << std::endl;
+      running_ = false;
+      return;
+  }
   
   std::cout << "Receiver: 已启动 " << thread_count_ 
             << " 个工作线程（每个线程一个队列和 EventLoop）" << std::endl;

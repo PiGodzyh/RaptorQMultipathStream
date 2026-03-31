@@ -16,10 +16,11 @@
 #include <condition_variable>
 #include <functional>
 
-#include "sender.h"
 #include "video_common.h"
 #include "VideoCodec/video_reader.h"
 #include "VideoCodec/video_codec.h"
+#include "unified_sender.h"
+#include "data_common.h"
 
 namespace VideoTransmit {
 
@@ -32,13 +33,9 @@ class VideoTransmitter {
 public:
     /**
      * 构造函数
-     * @param server_addr 目标服务器地址
-     * @param server_port 目标服务器端口（默认9001视频端口）
-     * @param encode_threads 编码线程数
+     * @param unified_sender 统一发送器（共享）
      */
-    VideoTransmitter(const std::string& server_addr, 
-                     uint16_t server_port = 9001,
-                     uint32_t encode_threads = 4);
+    VideoTransmitter(std::shared_ptr<UnifiedSender> unified_sender);
     
     ~VideoTransmitter();
 
@@ -99,10 +96,8 @@ private:
     std::unique_ptr<VideoCodec::VideoReader> video_reader_;
     bool video_opened_;
     
-    // 网络发送器
-    std::unique_ptr<Sender> sender_;
-    std::string server_addr_;
-    uint16_t server_port_;
+    // 统一发送器（外部传入，共享使用）
+    std::shared_ptr<UnifiedSender> unified_sender_;
     
     // 运行状态
     std::atomic<bool> running_;

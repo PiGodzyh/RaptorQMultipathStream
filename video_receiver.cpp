@@ -241,6 +241,13 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         
+        // 如果是第一个视频帧（next_expected_frame_seq_ 为 0），直接接受它作为起始
+        if (next_expected_frame_seq_ == 0) {
+            next_expected_frame_seq_ = header.frame_seq;
+            std::cout << "VideoReceiver: First frame received, starting from seq=" 
+                      << header.frame_seq << std::endl;
+        }
+        
         if (header.frame_seq == next_expected_frame_seq_) {
             // 期望的帧，直接处理
             should_process = true;
@@ -269,26 +276,50 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
             // 乱序到达，放入缓存
             pending_frames_[header.frame_seq] = frame;
             
-            // 缓存过大时丢弃旧帧（增加到100帧）
+            // 缓存过大时丢弃最旧的帧（避免无限等待）
             if (pending_frames_.size() > 100) {
+                // 丢弃最小的（最旧的）帧
                 auto it = pending_frames_.begin();
                 uint32_t dropped_seq = it->first;
                 pending_frames_.erase(it);
-                next_expected_frame_seq_ = pending_frames_.begin()->first;
+                frame_stats_.frames_dropped_full++;
                 
-                // 更新丢弃统计
-                {
-                    std::lock_guard<std::mutex> stats_lock(frame_stats_mutex_);
-                    frame_stats_.frames_dropped_full++;
-                    frame_stats_.frames_cached = pending_frames_.size();
-                    std::cout << "\n>>> [帧丢弃] 缓存溢出，丢弃帧 seq=" << dropped_seq << "\n";
-                    frame_stats_.Print("[接收统计] ");
+                // 更新期望序号为新的最小值（如果缓存不为空）
+                if (!pending_frames_.empty()) {
+                    next_expected_frame_seq_ = pending_frames_.begin()->first;
+                    std::cout << "\n>>> [帧丢弃] 缓存溢出，丢弃帧 seq=" << dropped_seq 
+                              << "，跳至期望=" << next_expected_frame_seq_ << "\n";
+                    
+                    // 重要：检查新期望的帧是否已经在缓存中
+                    // 连续处理缓存中所有连续的帧
+                    while (!pending_frames_.empty()) {
+                        auto next_it = pending_frames_.find(next_expected_frame_seq_);
+                        if (next_it == pending_frames_.end()) {
+                            break; // 期望的帧还没来
+                        }
+                        
+                        // 写入缓存帧
+                        if (output_opened_) {
+                            video_writer_->WriteFrame(next_it->second);
+                        }
+                        if (frame_callback_) {
+                            frame_callback_(next_it->second);
+                        }
+                        
+                        pending_frames_.erase(next_it);
+                        next_expected_frame_seq_++;
+                        written_count++;
+                        frame_stats_.frames_written++;
+                    }
+                } else {
+                    std::cout << "\n>>> [帧丢弃] 缓存溢出，丢弃帧 seq=" << dropped_seq 
+                              << "，缓存已空\n";
                 }
-            } else {
-                // 只是缓存，打印缓存状态
-                std::lock_guard<std::mutex> stats_lock(frame_stats_mutex_);
+                
                 frame_stats_.frames_cached = pending_frames_.size();
+                frame_stats_.Print("[接收统计] ");
             }
+            
             return;
         } else {
             // 过时的帧，丢弃

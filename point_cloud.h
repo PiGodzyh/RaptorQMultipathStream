@@ -12,7 +12,7 @@
 #define POINT_CLOUD_H
 
 #include "data_common.h"
-#include "sender.h"
+#include "unified_sender.h"
 #include "receiver.h"
 #include <atomic>
 #include <thread>
@@ -37,7 +37,7 @@ public:
 // ============================================================================
 class PointCloudTransmitter {
 public:
-    PointCloudTransmitter(const std::string& server_addr, int server_port);
+    PointCloudTransmitter(std::shared_ptr<UnifiedSender> unified_sender);
     ~PointCloudTransmitter();
     
     // 从文件发送点云
@@ -53,7 +53,7 @@ private:
     // 发送单帧
     bool SendFrame(const PointCloudFrame& frame, uint32_t frame_seq);
     
-    std::unique_ptr<Sender> sender_;
+    std::shared_ptr<UnifiedSender> unified_sender_;
     std::atomic<bool> running_{false};
     std::atomic<uint32_t> frame_counter_{0};
     std::mutex send_mutex_;

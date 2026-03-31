@@ -18,9 +18,11 @@
 #include <thread>
 #include <chrono>
 #include <csignal>
+#include <memory>
 
 #include "video_transmitter.h"
 #include "video_receiver.h"
+#include "unified_sender.h"
 
 using namespace VideoTransmit;
 
@@ -181,7 +183,18 @@ int RunSender(int argc, char* argv[]) {
     std::cout << "Input: " << input_file << std::endl;
     std::cout << std::endl;
     
-    VideoTransmitter transmitter(host, port, 4);
+    // 创建UnifiedSender
+    UnifiedSenderConfig config;
+    config.target_ip = host;
+    auto unified_sender = std::make_shared<UnifiedSender>(config);
+    if (!unified_sender->initialize()) {
+        std::cerr << "Failed to initialize UnifiedSender" << std::endl;
+        return 1;
+    }
+    unified_sender->start();
+    
+    // 创建VideoTransmitter，传入UnifiedSender
+    VideoTransmitter transmitter(unified_sender);
     
     // 设置回调
     transmitter.SetSendCallback([](uint32_t seq, FrameType type, size_t bytes, bool success) {

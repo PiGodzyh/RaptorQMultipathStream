@@ -121,12 +121,14 @@ int main(int argc, char* argv[]) {
     
     std::string mode = argv[1];
     
-    if (mode == "receive") {
+    // 支持 receiver/receive 和 sender/send
+    if (mode == "receive" || mode == "receiver") {
         return RunReceiver(argc, argv);
-    } else if (mode == "send") {
+    } else if (mode == "send" || mode == "sender") {
         return RunTransmitter(argc, argv);
     } else {
         std::cerr << "Unknown mode: " << mode << std::endl;
+        std::cerr << "Usage: " << argv[0] << " receive|send [args...]" << std::endl;
         return 1;
     }
 }
