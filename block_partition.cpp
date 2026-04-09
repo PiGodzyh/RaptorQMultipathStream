@@ -33,11 +33,17 @@ void BlockPartition::splitLargeFrame(const PendingFrame& frame) {
     uint32_t block_index = 0;
     uint32_t total_blocks = (data_size + policy_.max_block_size - 1) / policy_.max_block_size;
     
+    // 基础 stream_id，用于重组时识别同一帧的分块
+    uint32_t base_stream_id = frame.stream_id;
+    
     while (offset < data_size) {
         SourceBlock block;
         block.block_id = getNextBlockId();
         block.priority = frame.priority;
-        block.stream_id = frame.stream_id;
+        // 每个分块使用独立的 stream_id，避免 RaptorQ 流冲突
+        // 编码规则：base_id * 10000 + total_blocks * 1000 + block_index
+        // 这样接收端可以从 stream_id 解码出所有信息
+        block.stream_id = base_stream_id * 10000 + total_blocks * 1000 + block_index;
         block.start_seq = frame.seq;
         block.num_frames = 1;
         block.total_blocks = total_blocks;
