@@ -212,8 +212,8 @@ bool PointCloudTransmitter::SendFrame(const PointCloudFrame& frame, uint32_t fra
 // PointCloudReceiver 实现
 // ============================================================================
 
-PointCloudReceiver::PointCloudReceiver(int listen_port)
-    : receiver_(std::make_unique<Receiver>(this, listen_port, 2)) {
+PointCloudReceiver::PointCloudReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver)
+    : unified_receiver_(unified_receiver) {
 }
 
 PointCloudReceiver::~PointCloudReceiver() {
@@ -223,11 +223,13 @@ PointCloudReceiver::~PointCloudReceiver() {
 void PointCloudReceiver::Start() {
     running_ = true;
     
-    // 在单独线程中启动接收器（因为start()是阻塞的）
-    std::thread receiver_thread([this]() {
-        receiver_->start();
+    // 设置解码回调（使用多回调注册API）
+    callback_id_ = unified_receiver_->registerDecodeCallback([this](DataPriority priority, uint32_t stream_id,
+                                                 const std::vector<uint8_t>& data) {
+        if (priority == DataPriority::POINT_CLOUD) {
+            OnFrameReceived(priority, stream_id, data);
+        }
     });
-    receiver_thread.detach();
     
     std::cout << "========================================" << std::endl;
     std::cout << "   点云接收端" << std::endl;
@@ -237,12 +239,17 @@ void PointCloudReceiver::Start() {
 void PointCloudReceiver::Stop() {
     running_ = false;
     
+    // 注销回调
+    if (callback_id_ >= 0) {
+        unified_receiver_->unregisterDecodeCallback(callback_id_);
+        callback_id_ = -1;
+    }
+    
     // 保存剩余点云
     if (!accumulated_points_.empty()) {
         SavePointCloud(accumulated_points_);
     }
     
-    receiver_->stop();
     if (output_file_.is_open()) {
         output_file_.close();
     }
@@ -256,7 +263,7 @@ void PointCloudReceiver::SetOutputFile(const std::string& filepath) {
     }
 }
 
-void PointCloudReceiver::OnDecodeComplete(uint32_t stream_id,
+void PointCloudReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_id,
                                          const std::vector<uint8_t>& data) {
     if (data.size() < sizeof(PointCloudHeader)) {
         return;

@@ -12,9 +12,9 @@
 
 namespace VoiceReceive {
 
-VoiceReceiver::VoiceReceiver(uint16_t local_port)
-    : writer_(std::make_unique<VoiceCodec::VoiceWriter>())
-    , local_port_(local_port) {
+VoiceReceiver::VoiceReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver)
+    : unified_receiver_(unified_receiver)
+    , writer_(std::make_unique<VoiceCodec::VoiceWriter>()) {
 }
 
 VoiceReceiver::~VoiceReceiver() {
@@ -62,28 +62,22 @@ void VoiceReceiver::Start() {
     std::cout << "========================================" << std::endl;
     std::cout << "   Voice Receiver (File Mode)" << std::endl;
     std::cout << "========================================" << std::endl;
-    std::cout << "Port: " << local_port_ << std::endl;
+    std::cout << "Priority: VOICE (port 9004)" << std::endl;
     std::cout << "Output: " << output_path_ << std::endl;
     std::cout << "========================================" << std::endl;
     
-    // 设置接收回调
-    visitor_.SetCallback([this](uint32_t stream_id, const std::vector<uint8_t>& data) {
-        OnDataReceived(stream_id, data);
+    // 设置接收回调（使用多回调注册API）
+    callback_id_ = unified_receiver_->registerDecodeCallback([this](DataPriority priority, uint32_t stream_id,
+                                                 const std::vector<uint8_t>& data) {
+        if (priority == DataPriority::VOICE) {
+            OnFrameReceived(priority, stream_id, data);
+        }
     });
-    
-    // 创建 Receiver
-    receiver_ = std::make_unique<Receiver>(&visitor_, local_port_, 2);  // 2 工作线程
-    
-    // 启动 UDP 接收（在独立线程）
-    std::thread recv_thread([this]() {
-        receiver_->start();
-    });
-    recv_thread.detach();
     
     // 启动处理线程
     process_thread_ = std::thread([this]() { ProcessLoop(); });
     
-    std::cout << "[VoiceReceiver] Started, listening on port " << local_port_ << std::endl;
+    std::cout << "[VoiceReceiver] Started, listening on VOICE priority" << std::endl;
 }
 
 void VoiceReceiver::Stop() {
@@ -92,8 +86,11 @@ void VoiceReceiver::Stop() {
     running_ = false;
     queue_cv_.notify_all();
     
-    // 停止接收
-    receiver_->stop();
+    // 注销回调
+    if (callback_id_ >= 0) {
+        unified_receiver_->unregisterDecodeCallback(callback_id_);
+        callback_id_ = -1;
+    }
     
     // 等待线程结束
     if (process_thread_.joinable()) process_thread_.join();
@@ -117,7 +114,8 @@ void VoiceReceiver::Stop() {
     }
 }
 
-void VoiceReceiver::OnDataReceived(uint32_t stream_id, const std::vector<uint8_t>& data) {
+void VoiceReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_id, 
+                                    const std::vector<uint8_t>& data) {
     if (!running_) return;
     
     // 处理配置包 (stream_id = 0)

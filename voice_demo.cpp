@@ -8,9 +8,12 @@
 
 #include "voice_transmitter.h"
 #include "voice_receiver.h"
+#include "unified_receiver.h"
 #include <iostream>
 #include <cstdlib>
 #include <signal.h>
+
+using namespace DataTransmit;
 
 static std::atomic<bool> g_running(true);
 
@@ -30,7 +33,10 @@ int RunReceiver(int argc, char* argv[]) {
         output_path = argv[3];
     }
     
-    VoiceReceive::VoiceReceiver receiver(port);
+    auto unified_receiver = std::make_shared<UnifiedReceiver>(port);
+    unified_receiver->start();
+    
+    VoiceReceive::VoiceReceiver receiver(unified_receiver);
     
     if (!receiver.CreateOutput(output_path)) {
         std::cerr << "Failed to create output file: " << output_path << std::endl;
@@ -49,6 +55,7 @@ int RunReceiver(int argc, char* argv[]) {
     }
     
     receiver.Stop();
+    unified_receiver->stop();
     return 0;
 }
 

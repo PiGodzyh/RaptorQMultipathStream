@@ -46,12 +46,15 @@ VIDEO_CODEC_SRC = VideoCodec/video_reader.cpp VideoCodec/video_writer.cpp
 # 语音传输 - 源文件
 # ============================================
 VOICE_STREAMING_SRC = voice_demo.cpp voice_transmitter.cpp voice_receiver.cpp \
-                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp
+                      sender.cpp send_center.cpp receiver.cpp receiver_center.cpp \
+                      unified_sender.cpp unified_receiver.cpp send_buffer.cpp scheduler.cpp \
+                      block_partition.cpp feedback.cpp reorder_buffer.cpp
 VOICE_CODEC_SRC = VoiceCodec/voice_codec.cpp VoiceCodec/voice_reader.cpp
 
 # 多数据流传输 - 源文件
 # ============================================
 MULTI_STREAMING_SRC = multi_streaming_demo.cpp video_transmitter.cpp video_receiver.cpp \
+                      voice_transmitter.cpp voice_receiver.cpp \
                       fc_control.cpp point_cloud.cpp grid_map.cpp \
                       sender.cpp send_center.cpp receiver.cpp receiver_center.cpp \
                       unified_sender.cpp unified_receiver.cpp send_buffer.cpp scheduler.cpp \
@@ -287,7 +290,7 @@ $(BUILD_DIR)/voice_reader.o: VoiceCodec/voice_reader.cpp VoiceCodec/voice_reader
 # ============================================
 # 多数据流传输 - 编译规则
 # ============================================
-$(MULTI_STREAMING_EXE): $(MULTI_STREAMING_OBJS) $(VIDEO_CODEC_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB)
+$(MULTI_STREAMING_EXE): $(MULTI_STREAMING_OBJS) $(VIDEO_CODEC_OBJS) $(VOICE_CODEC_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB)
 	@echo "链接多数据流传输程序..."
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 	@echo "✓ 多数据流传输程序编译完成"
@@ -577,5 +580,6 @@ $(BUILD_DIR)/multi_stream_test.o: multi_stream_test.cpp unified_sender.h unified
 .PHONY: blockpartition
 blockpartition: check-deps $(BUILD_DIR) $(BLOCK_PARTITION_TEST_EXE)
 
-.PHONY: multistream
+.PHONY: multistream multi_streaming_demo
 multistream: check-deps $(BUILD_DIR) $(MULTI_STREAM_TEST_EXE)
+multi_streaming_demo: check-deps $(BUILD_DIR) $(MULTI_STREAMING_EXE)

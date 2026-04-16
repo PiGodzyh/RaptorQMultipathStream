@@ -15,7 +15,8 @@
 #include <set>
 #include <mutex>
 
-#include "receiver.h"
+#include "data_common.h"
+#include "unified_receiver.h"
 #include "video_common.h"
 #include "VideoCodec/video_writer.h"
 #include "VideoCodec/video_codec.h"
@@ -46,14 +47,13 @@ struct SourceBlockState {
     }
 };
 
-class VideoReceiver : public Receiver::Visitor {
+class VideoReceiver {
 public:
     /**
      * 构造函数
-     * @param port 监听端口（默认9001）
-     * @param thread_count 接收线程数
+     * @param unified_receiver 统一接收器
      */
-    VideoReceiver(uint16_t port = 9001, uint32_t thread_count = 4);
+    explicit VideoReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver);
     
     ~VideoReceiver();
 
@@ -111,8 +111,9 @@ public:
     bool GetVideoConfig(VideoConfig& config) const;
 
 private:
-    // Receiver::Visitor 接口实现
-    void OnDecodeComplete(uint32_t stream_id, const std::vector<uint8_t>& data) override;
+    // 帧接收回调
+    void OnFrameReceived(DataPriority priority, uint32_t stream_id, 
+                         const std::vector<uint8_t>& data);
 
     // 内部处理函数
     void ProcessDecodedData(uint32_t stream_id, const std::vector<uint8_t>& data);
@@ -126,9 +127,9 @@ private:
     // 报告错误
     void ReportError(const std::string& error);
 
-    // 网络接收器
-    std::unique_ptr<Receiver> receiver_;
-    uint16_t port_;
+    // 统一接收器
+    std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver_;
+    int callback_id_ = -1;  // 注册的回调ID
     
     // 视频写入器
     std::unique_ptr<VideoCodec::VideoWriter> video_writer_;

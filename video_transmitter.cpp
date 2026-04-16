@@ -17,7 +17,7 @@ VideoTransmitter::VideoTransmitter(std::shared_ptr<UnifiedSender> unified_sender
     , unified_sender_(unified_sender)
     , running_(false)
     , send_thread_running_(false)
-    , frame_seq_counter_(1)  // 从1开始，0保留给配置包
+    , frame_seq_counter_(0)  // 从0开始，配置包用0，视频帧从1开始
     , gop_counter_(0)
     , block_id_counter_(1)  // 从1开始，0保留给配置
     , current_gop_id_(0)

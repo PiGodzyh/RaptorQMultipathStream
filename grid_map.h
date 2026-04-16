@@ -13,7 +13,7 @@
 
 #include "data_common.h"
 #include "unified_sender.h"
-#include "receiver.h"
+#include "unified_receiver.h"
 #include <atomic>
 #include <thread>
 #include <fstream>
@@ -62,9 +62,9 @@ private:
 // ============================================================================
 // 栅格地图接收器
 // ============================================================================
-class GridMapReceiver : public Receiver::Visitor {
+class GridMapReceiver {
 public:
-    GridMapReceiver(int listen_port);
+    GridMapReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver);
     ~GridMapReceiver();
     
     // 启动接收
@@ -84,13 +84,15 @@ public:
     Stats GetStats() const { return stats_; }
 
 private:
-    // Receiver::Visitor 回调
-    void OnDecodeComplete(uint32_t stream_id, const std::vector<uint8_t>& data) override;
+    // 处理解码完成的帧
+    void OnFrameReceived(DataPriority priority, uint32_t stream_id, 
+                         const std::vector<uint8_t>& data);
     
     // 保存栅格地图到文件
     void SaveGridMap(const GridMapFrame& frame);
     
-    std::unique_ptr<Receiver> receiver_;
+    std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver_;
+    int callback_id_ = -1;  // 回调注册ID
     std::atomic<bool> running_{false};
     std::string output_path_;
     std::ofstream output_file_;

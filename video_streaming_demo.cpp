@@ -23,8 +23,10 @@
 #include "video_transmitter.h"
 #include "video_receiver.h"
 #include "unified_sender.h"
+#include "unified_receiver.h"
 
 using namespace VideoTransmit;
+using namespace DataTransmit;
 
 static std::atomic<bool> g_running(true);
 
@@ -78,7 +80,11 @@ int RunReceiver(int argc, char* argv[]) {
     std::cout << "Output: " << output_file << std::endl;
     std::cout << std::endl;
     
-    VideoReceiver receiver(port, 4);
+    // 创建统一接收器（监听 9001 视频端口）
+    auto unified_receiver = std::make_shared<UnifiedReceiver>(port);
+    unified_receiver->start();
+    
+    VideoReceiver receiver(unified_receiver);
     SetGlobalReceiver(&receiver);  // 设置全局接收器用于信号处理
     
     // 设置回调

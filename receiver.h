@@ -6,6 +6,7 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <condition_variable>
 #include <functional>
 #include <set>
 
@@ -126,6 +127,10 @@ class Receiver {
   std::vector<std::thread> worker_threads_;
     
   std::atomic<bool> running_;
+  // 队列初始化同步
+  std::atomic<uint32_t> initialized_queues_{0};
+  std::mutex init_mutex_;
+  std::condition_variable init_cv_;
   // 统计信息，实际使用时可以删除
   std::atomic<uint64_t> received_count_;
   std::atomic<uint64_t> processed_count_;

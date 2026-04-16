@@ -11,9 +11,19 @@
 
 namespace VideoTransmit {
 
-VideoReceiver::VideoReceiver(uint16_t port, uint32_t thread_count)
-    : receiver_(std::make_unique<Receiver>(this, port, thread_count))
-    , port_(port)
+// 辅助函数：帧类型转字符串
+static const char* FrameTypeToStr(FrameType type) {
+    switch (type) {
+        case FrameType::I_FRAME: return "I";
+        case FrameType::P_FRAME: return "P";
+        case FrameType::B_FRAME: return "B";
+        case FrameType::CONFIG: return "CONFIG";
+        default: return "?";
+    }
+}
+
+VideoReceiver::VideoReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver)
+    : unified_receiver_(unified_receiver)
     , video_writer_(std::make_unique<VideoCodec::VideoWriter>())
     , output_opened_(false)
     , config_received_(false)
@@ -33,13 +43,15 @@ void VideoReceiver::Start() {
     
     running_ = true;
     
-    // 启动接收器（在单独线程中运行，因为start()是阻塞的）
-    std::thread receiver_thread([this]() {
-        receiver_->start();
+    // 注册解码回调（使用新的多接收器支持接口）
+    callback_id_ = unified_receiver_->registerDecodeCallback([this](DataPriority priority, uint32_t stream_id,
+                                                                   const std::vector<uint8_t>& data) {
+        if (priority == DataPriority::VIDEO) {
+            OnFrameReceived(priority, stream_id, data);
+        }
     });
-    receiver_thread.detach();
     
-    std::cout << "VideoReceiver: Started on port " << port_ << std::endl;
+    std::cout << "VideoReceiver: Started on VIDEO priority (port 9001), callback_id=" << callback_id_ << std::endl;
 }
 
 void VideoReceiver::Stop() {
@@ -49,8 +61,11 @@ void VideoReceiver::Stop() {
     
     running_ = false;
     
-    // 停止接收器
-    receiver_->stop();
+    // 注销回调
+    if (callback_id_ >= 0) {
+        unified_receiver_->unregisterDecodeCallback(callback_id_);
+        callback_id_ = -1;
+    }
     
     std::cout << "VideoReceiver: Stopped" << std::endl;
 }
@@ -137,7 +152,8 @@ bool VideoReceiver::GetVideoConfig(VideoConfig& config) const {
     return true;
 }
 
-void VideoReceiver::OnDecodeComplete(uint32_t stream_id, const std::vector<uint8_t>& data) {
+void VideoReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_id, 
+                                    const std::vector<uint8_t>& data) {
     std::cout << "[VideoReceiver] OnDecodeComplete: stream_id=" << stream_id 
               << ", data_size=" << data.size() << std::endl;
     
@@ -274,13 +290,17 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
             }
         } else if (header.frame_seq > next_expected_frame_seq_) {
             // 乱序到达，放入缓存
+            std::cout << "[VideoReceiver] Caching out-of-order frame seq=" << header.frame_seq 
+                      << " type=" << FrameTypeToStr(header.frame_type)
+                      << " (expecting=" << next_expected_frame_seq_ << ")\n";
             pending_frames_[header.frame_seq] = frame;
             
             // 缓存过大时丢弃最旧的帧（避免无限等待）
-            if (pending_frames_.size() > 100) {
+            if (pending_frames_.size() > 500) {
                 // 丢弃最小的（最旧的）帧
                 auto it = pending_frames_.begin();
                 uint32_t dropped_seq = it->first;
+                auto dropped_frame = it->second;  // 保存帧信息用于调试
                 pending_frames_.erase(it);
                 frame_stats_.frames_dropped_full++;
                 
@@ -288,7 +308,12 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
                 if (!pending_frames_.empty()) {
                     next_expected_frame_seq_ = pending_frames_.begin()->first;
                     std::cout << "\n>>> [帧丢弃] 缓存溢出，丢弃帧 seq=" << dropped_seq 
-                              << "，跳至期望=" << next_expected_frame_seq_ << "\n";
+                              << " 类型=" << FrameTypeToStr(static_cast<FrameType>(dropped_frame.type))
+                              << " 大小=" << dropped_frame.data.size()
+                              << " 当前接收seq=" << header.frame_seq
+                              << " 类型=" << FrameTypeToStr(header.frame_type)
+                              << " 缓存=" << pending_frames_.size() + 1 << "->" << pending_frames_.size()
+                              << " 跳至期望=" << next_expected_frame_seq_ << "\n";
                     
                     // 重要：检查新期望的帧是否已经在缓存中
                     // 连续处理缓存中所有连续的帧
@@ -313,6 +338,10 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
                     }
                 } else {
                     std::cout << "\n>>> [帧丢弃] 缓存溢出，丢弃帧 seq=" << dropped_seq 
+                              << " 类型=" << FrameTypeToStr(static_cast<FrameType>(dropped_frame.type))
+                              << " 大小=" << dropped_frame.data.size()
+                              << " 当前接收seq=" << header.frame_seq
+                              << " 类型=" << FrameTypeToStr(header.frame_type)
                               << "，缓存已空\n";
                 }
                 
@@ -328,7 +357,11 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
                 frame_stats_.frames_dropped_old++;
                 frame_stats_.frames_cached = pending_frames_.size();
                 std::cout << "\n>>> [帧丢弃] 过时帧 seq=" << header.frame_seq 
-                          << " (期望:" << next_expected_frame_seq_ << ")\n";
+                          << " 类型=" << FrameTypeToStr(header.frame_type)
+                          << " 大小=" << frame.data.size()
+                          << " 期望=" << next_expected_frame_seq_
+                          << " 缓存=" << pending_frames_.size()
+                          << " 落后于期望=" << (next_expected_frame_seq_ - header.frame_seq) << "帧\n";
                 frame_stats_.Print("[接收统计] ");
             }
             return;
@@ -339,7 +372,13 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
     if (should_process) {
         // 写入文件
         if (output_opened_) {
-            video_writer_->WriteFrame(frame);
+            std::cout << "[VideoReceiver] Writing frame seq=" << header.frame_seq 
+                      << " type=" << FrameTypeToStr(header.frame_type)
+                      << " size=" << frame.data.size() << " to file\n";
+            bool write_ok = video_writer_->WriteFrame(frame);
+            if (!write_ok) {
+                std::cerr << "[VideoReceiver] Failed to write frame seq=" << header.frame_seq << "\n";
+            }
         }
         
         // 回调

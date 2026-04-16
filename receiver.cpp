@@ -1,6 +1,7 @@
 #include "receiver.h"
 #include <iostream>
 #include <cstring>
+#include <condition_variable>
 
 #include "common.h"
 
@@ -39,14 +40,21 @@ void Receiver::start() {
   }
   
   running_ = true;
+  initialized_queues_ = 0;
   
   // 启动工作线程，每个线程运行自己的 EventLoop
   for (uint32_t i = 0; i < thread_count_; ++i) {
       worker_threads_.emplace_back(&Receiver::eventLoopThread, this, i);
   }
     
-  // 等待所有队列初始化完成
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  // 等待所有队列初始化完成（而不是固定100ms）
+  std::unique_lock<std::mutex> lock(init_mutex_);
+  init_cv_.wait(lock, [this]() {
+    return initialized_queues_.load() >= thread_count_;
+  });
+  lock.unlock();
+  
+  std::cout << "Receiver: 所有 " << thread_count_ << " 个队列已初始化" << std::endl;
   
   // 启动网络服务器（非阻塞版本）
   if (!server_.startAsync()) {
@@ -138,6 +146,13 @@ void Receiver::eventLoopThread(uint32_t thread_id) {
     );
       
     std::cout << "线程 " << thread_id << " 队列已创建" << std::endl;
+    
+    // 通知主线程队列已初始化
+    {
+      std::lock_guard<std::mutex> lock(init_mutex_);
+      initialized_queues_++;
+    }
+    init_cv_.notify_one();
       
   } catch (const std::exception& e) {
     std::cerr << "线程 " << thread_id << " 创建队列失败: " << e.what() << std::endl;

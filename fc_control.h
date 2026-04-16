@@ -13,7 +13,7 @@
 
 #include "data_common.h"
 #include "unified_sender.h"
-#include "receiver.h"
+#include "unified_receiver.h"
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -53,9 +53,9 @@ private:
 // ============================================================================
 // 飞控指令接收器
 // ============================================================================
-class FCControlReceiver : public Receiver::Visitor {
+class FCControlReceiver {
 public:
-    FCControlReceiver(int listen_port);
+    FCControlReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver);
     ~FCControlReceiver();
     
     // 启动接收
@@ -68,10 +68,12 @@ public:
     void SetLogFile(const std::string& log_path);
 
 private:
-    // Receiver::Visitor 回调
-    void OnDecodeComplete(uint32_t stream_id, const std::vector<uint8_t>& data) override;
+    // 处理解码完成的帧
+    void OnFrameReceived(DataPriority priority, uint32_t stream_id, 
+                         const std::vector<uint8_t>& data);
     
-    std::unique_ptr<Receiver> receiver_;
+    std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver_;
+    int callback_id_ = -1;  // 回调注册ID
     std::atomic<bool> running_{false};
     std::ofstream log_file_;
     std::mutex log_mutex_;

@@ -260,10 +260,24 @@ uint16_t UnifiedReceiver::priorityToPort(DataPriority priority) {
 }
 
 void UnifiedReceiver::setDecodeCallback(DecodeCallback callback) {
-    decode_callback_ = callback;
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    legacy_decode_callback_ = callback;
+}
+
+int UnifiedReceiver::registerDecodeCallback(DecodeCallback callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    int id = next_callback_id_++;
+    decode_callbacks_[id] = callback;
+    return id;
+}
+
+void UnifiedReceiver::unregisterDecodeCallback(int id) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    decode_callbacks_.erase(id);
 }
 
 void UnifiedReceiver::setErrorCallback(ErrorCallback callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
     error_callback_ = callback;
 }
 
@@ -377,9 +391,19 @@ void UnifiedReceiver::onReassembledData(DataPriority priority, uint32_t stream_i
         stats_.per_priority_frames[priority]++;
     }
     
-    // 回调用户
-    if (decode_callback_) {
-        decode_callback_(priority, stream_id, data);
+    // 回调所有注册用户
+    std::map<int, DecodeCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        callbacks = decode_callbacks_;  // 复制避免持有锁时调用
+        if (legacy_decode_callback_) {
+            legacy_decode_callback_(priority, stream_id, data);
+        }
+    }
+    for (const auto& pair : callbacks) {
+        if (pair.second) {
+            pair.second(priority, stream_id, data);
+        }
     }
 }
 

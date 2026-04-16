@@ -9,7 +9,7 @@
 #define VOICE_RECEIVER_H
 
 #include "data_common.h"
-#include "receiver.h"
+#include "unified_receiver.h"
 #include "VoiceCodec/voice_reader.h"
 #include <atomic>
 #include <thread>
@@ -29,33 +29,14 @@ struct ReceiveFrame {
     std::vector<uint8_t> pcm_data;  // PCM 数据
 };
 
-// 接收器 Visitor 实现
-class VoiceReceiverVisitor : public Receiver::Visitor {
-public:
-    VoiceReceiverVisitor() = default;
-    
-    void SetCallback(std::function<void(uint32_t, const std::vector<uint8_t>&)> callback) {
-        callback_ = callback;
-    }
-    
-    void OnDecodeComplete(uint32_t stream_id, const std::vector<uint8_t>& data) override {
-        if (callback_) {
-            callback_(stream_id, data);
-        }
-    }
-
-private:
-    std::function<void(uint32_t, const std::vector<uint8_t>&)> callback_;
-};
-
 // 语音接收器
 class VoiceReceiver {
 public:
     /**
      * 构造函数
-     * @param local_port 监听端口（默认9004）
+     * @param unified_receiver 统一接收器
      */
-    explicit VoiceReceiver(uint16_t local_port = 9004);
+    explicit VoiceReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver);
     ~VoiceReceiver();
     
     /**
@@ -93,7 +74,8 @@ public:
 
 private:
     // 处理接收到的数据
-    void OnDataReceived(uint32_t stream_id, const std::vector<uint8_t>& data);
+    void OnFrameReceived(DataPriority priority, uint32_t stream_id, 
+                         const std::vector<uint8_t>& data);
     
     // 处理线程（解码 + 写入文件）
     void ProcessLoop();
@@ -107,11 +89,11 @@ private:
     // 初始化写入器
     bool InitWriter();
     
-    VoiceReceiverVisitor visitor_;
-    std::unique_ptr<Receiver> receiver_;
+    std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver_;
     std::unique_ptr<VoiceCodec::VoiceWriter> writer_;
+    int callback_id_ = -1;  // 回调注册ID
     
-    uint16_t local_port_;
+
     std::string output_path_;
     
     // 音频参数（从配置包获取）

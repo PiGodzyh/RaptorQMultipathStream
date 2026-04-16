@@ -153,8 +153,8 @@ bool GridMapTransmitter::SendFrame(const GridMapFrame& frame, uint32_t frame_seq
 // GridMapReceiver 实现
 // ============================================================================
 
-GridMapReceiver::GridMapReceiver(int listen_port)
-    : receiver_(std::make_unique<Receiver>(this, listen_port, 2)) {
+GridMapReceiver::GridMapReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver)
+    : unified_receiver_(unified_receiver) {
 }
 
 GridMapReceiver::~GridMapReceiver() {
@@ -164,11 +164,13 @@ GridMapReceiver::~GridMapReceiver() {
 void GridMapReceiver::Start() {
     running_ = true;
     
-    // 在单独线程中启动接收器（因为start()是阻塞的）
-    std::thread receiver_thread([this]() {
-        receiver_->start();
+    // 设置解码回调（使用多回调注册API）
+    callback_id_ = unified_receiver_->registerDecodeCallback([this](DataPriority priority, uint32_t stream_id,
+                                                 const std::vector<uint8_t>& data) {
+        if (priority == DataPriority::GRID_MAP) {
+            OnFrameReceived(priority, stream_id, data);
+        }
     });
-    receiver_thread.detach();
     
     std::cout << "========================================" << std::endl;
     std::cout << "   栅格地图接收端" << std::endl;
@@ -177,7 +179,13 @@ void GridMapReceiver::Start() {
 
 void GridMapReceiver::Stop() {
     running_ = false;
-    receiver_->stop();
+    
+    // 注销回调
+    if (callback_id_ >= 0) {
+        unified_receiver_->unregisterDecodeCallback(callback_id_);
+        callback_id_ = -1;
+    }
+    
     if (output_file_.is_open()) {
         output_file_.close();
     }
@@ -188,7 +196,7 @@ void GridMapReceiver::SetOutputFile(const std::string& filepath) {
     output_path_ = filepath;
 }
 
-void GridMapReceiver::OnDecodeComplete(uint32_t stream_id,
+void GridMapReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_id,
                                       const std::vector<uint8_t>& data) {
     if (data.size() < sizeof(GridMapHeader)) {
         return;

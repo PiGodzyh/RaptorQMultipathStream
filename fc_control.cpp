@@ -3,6 +3,8 @@
  */
 
 #include "fc_control.h"
+
+#include "unified_receiver.h"
 #include <iostream>
 #include <cstring>
 #include <chrono>
@@ -106,8 +108,8 @@ bool FCControlTransmitter::SendFrame(const FCControlPacket& packet, uint32_t seq
 // FCControlReceiver 实现
 // ============================================================================
 
-FCControlReceiver::FCControlReceiver(int listen_port)
-    : receiver_(std::make_unique<Receiver>(this, listen_port, 1)) {
+FCControlReceiver::FCControlReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver)
+    : unified_receiver_(unified_receiver) {
 }
 
 FCControlReceiver::~FCControlReceiver() {
@@ -117,11 +119,13 @@ FCControlReceiver::~FCControlReceiver() {
 void FCControlReceiver::Start() {
     running_ = true;
     
-    // 在单独线程中启动接收器（因为start()是阻塞的）
-    std::thread receiver_thread([this]() {
-        receiver_->start();
+    // 设置解码回调（使用多回调注册API）
+    callback_id_ = unified_receiver_->registerDecodeCallback([this](DataPriority priority, uint32_t stream_id,
+                                                 const std::vector<uint8_t>& data) {
+        if (priority == DataPriority::FC_COMMAND) {
+            OnFrameReceived(priority, stream_id, data);
+        }
     });
-    receiver_thread.detach();
     
     std::cout << "========================================" << std::endl;
     std::cout << "   飞控指令接收端" << std::endl;
@@ -131,7 +135,13 @@ void FCControlReceiver::Start() {
 
 void FCControlReceiver::Stop() {
     running_ = false;
-    receiver_->stop();
+    
+    // 注销回调
+    if (callback_id_ >= 0) {
+        unified_receiver_->unregisterDecodeCallback(callback_id_);
+        callback_id_ = -1;
+    }
+    
     if (log_file_.is_open()) {
         log_file_.close();
     }
@@ -145,7 +155,7 @@ void FCControlReceiver::SetLogFile(const std::string& log_path) {
     log_file_.open(log_path, std::ios::out | std::ios::app);
 }
 
-void FCControlReceiver::OnDecodeComplete(uint32_t stream_id, 
+void FCControlReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_id,
                                         const std::vector<uint8_t>& data) {
     if (data.size() < sizeof(FCControlHeader)) {
         std::cerr << "[FC] 数据包过小: " << data.size() << " < " << sizeof(FCControlHeader) << std::endl;

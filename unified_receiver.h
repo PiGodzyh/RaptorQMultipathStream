@@ -135,6 +135,10 @@ public:
     void setDecodeCallback(DecodeCallback callback);
     void setErrorCallback(ErrorCallback callback);
     
+    // 多接收器支持：注册/注销回调（每个接收器独立注册）
+    int registerDecodeCallback(DecodeCallback callback);
+    void unregisterDecodeCallback(int id);
+    
     // 启动/停止所有接收端口
     bool start();
     void stop();
@@ -184,8 +188,11 @@ private:
     std::unique_ptr<BlockReassembler> reassembler_;
     std::thread reassembly_cleanup_thread_;
     
-    // 回调
-    DecodeCallback decode_callback_;
+    // 回调（支持多接收器）
+    mutable std::mutex callback_mutex_;
+    std::map<int, DecodeCallback> decode_callbacks_;  // 多回调注册表
+    int next_callback_id_ = 0;
+    DecodeCallback legacy_decode_callback_;  // 兼容旧接口
     ErrorCallback error_callback_;
     
     // 统计
