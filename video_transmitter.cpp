@@ -134,22 +134,35 @@ void VideoTransmitter::SendThreadFunc() {
         return;
     }
     
+    // 获取视频帧率，计算帧间隔
+    auto info = video_reader_->GetVideoInfo();
+    int fps_interval_us = 0;
+    if (info.fps_num > 0 && info.fps_den > 0) {
+        fps_interval_us = (info.fps_den * 1000000) / info.fps_num;
+        std::cout << "VideoTransmitter: Video FPS=" << info.fps_num << "/" << info.fps_den
+                  << ", frame interval=" << fps_interval_us << "us" << std::endl;
+    } else {
+        // 默认 25fps
+        fps_interval_us = 40000;
+        std::cout << "VideoTransmitter: Unknown FPS, defaulting to 25fps (40000us)" << std::endl;
+    }
+    
     // 读取并发送帧
     VideoCodec::EncodedFrame frame;
     int frame_count = 0;
+    auto next_frame_time = std::chrono::steady_clock::now();
+    
     while (send_thread_running_ && video_reader_->ReadFrame(frame)) {
         frame_count++;
-        std::cout << "[VideoTransmitter] Read frame " << frame_count 
-                  << " (" << VideoCodec::FrameTypeToString(frame.type)
-                  << ", " << frame.data.size() << " bytes)" << std::endl;
         
         if (!SendFrame(frame)) {
             ReportError("Failed to send frame " + std::to_string(frame_count));
             continue;
         }
         
-        // 发送间隔控制 10ms
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // 按帧率间隔发送：sleep_until 保证即使发送耗时波动也能对齐时间轴
+        next_frame_time += std::chrono::microseconds(fps_interval_us);
+        std::this_thread::sleep_until(next_frame_time);
         
         // GOP管理
         if (frame.is_key_frame) {

@@ -140,22 +140,42 @@ int RunUnifiedReceiver(int base_port) {
     // 启动 UnifiedReceiver（开始接收数据）
     unified_receiver->start();
     
-    // 等待视频配置并创建输出文件
-    std::cout << "等待视频配置..." << std::endl;
-    int wait_count = 0;
-    while (!video_receiver.IsOutputOpen() && g_running && wait_count < 300) {
-        if (!video_receiver.CreateOutputFile(video_output)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            wait_count++;
-            if (wait_count % 10 == 0) {
-                std::cout << "  等待视频配置... (" << wait_count * 100 << "ms)" << std::endl;
-            }
-        }
-    }
+    // 在后台线程中并行创建视频输出文件和实时显示管道
+    std::atomic<bool> file_created{false};
+    std::atomic<bool> pipe_created{false};
     
-    if (!video_receiver.IsOutputOpen()) {
-        std::cerr << "警告: 未能创建视频输出文件" << std::endl;
-    }
+    // 后台线程1：创建输出文件（MP4）
+    std::thread file_thread([&video_receiver, &video_output, &file_created]() {
+        int retry = 0;
+        while (!file_created && retry < 300) {
+            if (video_receiver.CreateOutputFile(video_output)) {
+                file_created = true;
+                std::cout << "[后台] 视频输出文件创建成功" << std::endl;
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            retry++;
+        }
+        if (!file_created) {
+            std::cerr << "[后台] 警告: 未能创建视频输出文件" << std::endl;
+        }
+    });
+    file_thread.detach();
+    
+    // 后台线程2：创建实时显示管道
+    std::thread pipe_thread([&video_receiver, &pipe_created]() {
+        std::cout << "[后台线程] 开始创建实时显示管道..." << std::endl;
+        // 等待一小段时间确保 UnifiedReceiver 已启动
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::cout << "[后台线程] 调用 CreateLivePipe..." << std::endl;
+        if (video_receiver.CreateLivePipe("/tmp/video_live.h264")) {
+            pipe_created = true;
+            std::cout << "[后台线程] 实时显示管道创建成功" << std::endl;
+        } else {
+            std::cerr << "[后台线程] 实时显示管道创建失败!" << std::endl;
+        }
+    });
+    pipe_thread.detach();
     
     std::cout << "所有接收器已启动，等待数据..." << std::endl;
     
@@ -204,6 +224,11 @@ int RunVideoReceiver(int port, const std::string& output_file) {
     
     unified_receiver->start();
     
+    // 先创建实时显示管道（让 ffplay 可以提前连接）
+    if (receiver.CreateLivePipe("/tmp/video_live.h264")) {
+        std::cout << "[VideoReceiver] 实时显示管道已创建: /tmp/video_live.h264" << std::endl;
+    }
+    
     // 等待并创建输出文件
     std::cout << "等待视频配置..." << std::endl;
     int wait_count = 0;
@@ -225,6 +250,7 @@ int RunVideoReceiver(int port, const std::string& output_file) {
     }
     
     std::cout << "输出文件已创建: " << output_path << std::endl;
+    
     std::cout << "开始接收视频数据... (按 Ctrl+C 停止)" << std::endl;
     
     while (g_running) {
@@ -387,6 +413,7 @@ int RunFCSender(const std::string& addr, int port) {
     
     // 设置信号处理，用于优雅退出输入循环
     signal(SIGINT, SignalHandler);
+    signal(SIGTERM, SignalHandler);
     
     transmitter.Run();
     
@@ -441,6 +468,7 @@ int RunPointCloudSender(const std::string& addr, int port, const std::string& in
     PointCloudTransmitter transmitter(unified_sender);
     
     signal(SIGINT, SignalHandler);
+    signal(SIGTERM, SignalHandler);
     
     if (!input_file.empty() && input_file != "test" && input_file.find(':') == std::string::npos) {
         std::string input_path = GetInputDir(DataTransmit::DataType::POINT_CLOUD) + input_file;
@@ -511,6 +539,7 @@ int RunGridMapSender(const std::string& addr, int port, const std::string& input
     GridMapTransmitter transmitter(unified_sender);
     
     signal(SIGINT, SignalHandler);
+    signal(SIGTERM, SignalHandler);
     
     if (!input_file.empty() && input_file != "test") {
         std::string input_path = GetInputDir(DataTransmit::DataType::GRID_MAP) + input_file;
@@ -537,6 +566,7 @@ int main(int argc, char* argv[]) {
     
     // 设置信号处理
     signal(SIGINT, SignalHandler);
+    signal(SIGTERM, SignalHandler);
     
     // 统一接收模式（同时接收所有数据类型）
     if (role == "receiver_all") {

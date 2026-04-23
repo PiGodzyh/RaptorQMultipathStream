@@ -8,8 +8,39 @@
 #include <iostream>
 #include <cstring>
 #include <thread>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace VideoTransmit {
+
+// 辅助函数：将 AVCC 格式的 H.264 帧转换为 Annex B 格式
+static std::vector<uint8_t> ConvertAvccFrameToAnnexB(const uint8_t* data, size_t size, int length_size) {
+    std::vector<uint8_t> result;
+    result.reserve(size + 128);
+    
+    size_t offset = 0;
+    const uint8_t start_code[] = {0x00, 0x00, 0x00, 0x01};
+    
+    while (offset + length_size <= size) {
+        uint32_t nal_length = 0;
+        for (int i = 0; i < length_size; i++) {
+            nal_length = (nal_length << 8) | data[offset + i];
+        }
+        offset += length_size;
+        
+        if (nal_length == 0 || offset + nal_length > size) {
+            break;
+        }
+        
+        result.insert(result.end(), start_code, start_code + 4);
+        result.insert(result.end(), data + offset, data + offset + nal_length);
+        offset += nal_length;
+    }
+    
+    return result;
+}
 
 // 辅助函数：帧类型转字符串
 static const char* FrameTypeToStr(FrameType type) {
@@ -34,6 +65,17 @@ VideoReceiver::VideoReceiver(std::shared_ptr<DataTransmit::UnifiedReceiver> unif
 VideoReceiver::~VideoReceiver() {
     Stop();
     CloseOutputFile();
+    
+    // 关闭实时显示管道
+    if (pipe_fd_ >= 0) {
+        close(pipe_fd_);
+        pipe_fd_ = -1;
+    }
+    // 删除管道文件
+    if (pipe_created_ && !pipe_path_.empty()) {
+        unlink(pipe_path_.c_str());
+        pipe_created_ = false;
+    }
 }
 
 void VideoReceiver::Start() {
@@ -75,21 +117,19 @@ bool VideoReceiver::CreateOutputFile(const std::string& filepath) {
         CloseOutputFile();
     }
     
-    // 等待视频配置
-    std::cout << "Waiting for video config..." << std::endl;
+    // 等待视频配置（静默等待，不频繁打印）
     int retry = 0;
     while (!config_received_ && retry < 300) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         retry++;
-        if (retry % 10 == 0) {
-            std::cout << "  waiting... (" << retry * 100 << "ms)" << std::endl;
-        }
     }
     
     if (!config_received_) {
-        ReportError("Video config not received, cannot create output file");
+        ReportError("Video config not received after 30s, cannot create output file");
         return false;
     }
+    
+    std::cout << "VideoReceiver: Config received, creating output file..." << std::endl;
     
     // 构建视频参数
     VideoCodec::VideoWriterParams params;
@@ -120,6 +160,125 @@ void VideoReceiver::CloseOutputFile() {
         video_writer_->Close();
         output_opened_ = false;
     }
+}
+
+bool VideoReceiver::CreateLivePipe(const std::string& pipe_path) {
+    std::cout << "[CreateLivePipe] 开始创建管道: " << pipe_path << std::endl;
+    
+    pipe_path_ = pipe_path;
+    
+    // 如果管道已存在，先删除
+    unlink(pipe_path_.c_str());
+    
+    // 创建命名管道
+    std::cout << "[CreateLivePipe] 调用 mkfifo..." << std::endl;
+    if (mkfifo(pipe_path_.c_str(), 0666) < 0) {
+        std::cerr << "[VideoReceiver] Failed to create pipe: " << pipe_path_ 
+                  << " (error: " << strerror(errno) << ")" << std::endl;
+        return false;
+    }
+    std::cout << "[CreateLivePipe] mkfifo 成功" << std::endl;
+    
+    pipe_created_ = true;
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "   实时显示管道已创建" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "管道路径: " << pipe_path_ << std::endl;
+    std::cout << "\n>>> 重要：请先启动 ffplay，再启动发送端 <<<" << std::endl;
+    std::cout << "\n命令:" << std::endl;
+    std::cout << "  ffplay -fflags nobuffer -flags low_delay -f h264 " << pipe_path_ << std::endl;
+    std::cout << "或 VLC:" << std::endl;
+    std::cout << "  vlc " << pipe_path_ << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    
+    // 以非阻塞方式打开管道（先返回，让调用者可以继续）
+    pipe_fd_ = open(pipe_path_.c_str(), O_WRONLY | O_NONBLOCK);
+    if (pipe_fd_ < 0 && errno == ENXIO) {
+        // 没有读取端，这是正常的，等会再试
+        std::cout << "[VideoReceiver] 等待播放器连接..." << std::endl;
+    } else if (pipe_fd_ >= 0) {
+        // 已经有读取端连接了
+        std::cout << "[VideoReceiver] 播放器已连接，准备实时传输" << std::endl;
+    } else {
+        std::cerr << "[VideoReceiver] Failed to open pipe: " << strerror(errno) << std::endl;
+        unlink(pipe_path_.c_str());
+        pipe_created_ = false;
+        return false;
+    }
+    
+    return true;
+}
+
+bool VideoReceiver::WriteSpsPpsToPipe() {
+    if (sps_pps_written_ || extradata_.empty() || pipe_fd_ < 0) {
+        return false;
+    }
+    
+    // H.264 extradata (AVCC format) 转 Annex B
+    // Format: 
+    //   byte 0:    configurationVersion (1)
+    //   byte 1:    AVCProfileIndication
+    //   byte 2:    profile_compatibility
+    //   byte 3:    AVCLevelIndication
+    //   byte 4:    reserved(6bits) + lengthSizeMinusOne(2bits)
+    //   byte 5:    reserved(3bits) + numOfSequenceParameterSets(5bits)
+    //   Then for each SPS:
+    //     2 bytes: SPS length
+    //     N bytes: SPS data
+    //   Then:
+    //     1 byte:  numOfPictureParameterSets
+    //   Then for each PPS:
+    //     2 bytes: PPS length
+    //     N bytes: PPS data
+    
+    if (extradata_.size() < 7) {
+        return false;
+    }
+    
+    const uint8_t* data = extradata_.data();
+    size_t size = extradata_.size();
+    
+    uint8_t length_size = (data[4] & 0x03) + 1;  // 通常为4
+    uint8_t num_sps = data[5] & 0x1F;
+    
+    size_t offset = 6;
+    static const uint8_t start_code[] = {0x00, 0x00, 0x00, 0x01};
+    bool written_any = false;
+    
+    // 写入 SPS
+    for (uint8_t i = 0; i < num_sps && offset + 2 <= size; i++) {
+        uint16_t sps_len = (data[offset] << 8) | data[offset + 1];
+        offset += 2;
+        if (offset + sps_len > size) break;
+        
+        write(pipe_fd_, start_code, sizeof(start_code));
+        write(pipe_fd_, data + offset, sps_len);
+        offset += sps_len;
+        written_any = true;
+        std::cout << "[VideoReceiver] 写入 SPS 到管道 (" << sps_len << " bytes)" << std::endl;
+    }
+    
+    // 写入 PPS
+    if (offset < size) {
+        uint8_t num_pps = data[offset++];
+        for (uint8_t i = 0; i < num_pps && offset + 2 <= size; i++) {
+            uint16_t pps_len = (data[offset] << 8) | data[offset + 1];
+            offset += 2;
+            if (offset + pps_len > size) break;
+            
+            write(pipe_fd_, start_code, sizeof(start_code));
+            write(pipe_fd_, data + offset, pps_len);
+            offset += pps_len;
+            written_any = true;
+            std::cout << "[VideoReceiver] 写入 PPS 到管道 (" << pps_len << " bytes)" << std::endl;
+        }
+    }
+    
+    if (written_any) {
+        sps_pps_written_ = true;
+    }
+    return written_any;
 }
 
 void VideoReceiver::SetFrameCallback(VideoFrameCallback callback) {
@@ -199,6 +358,10 @@ void VideoReceiver::ProcessVideoConfig(const std::vector<uint8_t>& data) {
         std::lock_guard<std::mutex> lock(config_mutex_);
         video_config_ = config_packet.config;
         extradata_ = config_packet.extradata;
+        if (!extradata_.empty() && extradata_.size() >= 5) {
+            avcc_length_size_ = (extradata_[4] & 0x03) + 1;
+            std::cout << "[VideoReceiver] AVCC length_size=" << avcc_length_size_ << std::endl;
+        }
         config_received_ = true;
     }
     
@@ -238,10 +401,21 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
     size_t frame_data_size = data.size() - sizeof(VideoFrameHeader);
     const uint8_t* frame_data = data.data() + sizeof(VideoFrameHeader);
     
+    // 注意：从 MP4/FFmpeg 接收的 H.264 数据是 AVCC 格式（4字节长度前缀）
+    // MP4 文件写入需要 AVCC 格式，管道输出需要 Annex B 格式
+    // 转换在管道写入时进行，frame.data 保持原始 AVCC 格式
+    
     // 构建EncodedFrame
     VideoCodec::EncodedFrame frame;
     frame.data.resize(header.frame_size);
     memcpy(frame.data.data(), frame_data, std::min(frame.data.size(), frame_data_size));
+    
+    // 调试：打印前几字节
+    std::cout << "[VideoReceiver] H.264数据前8字节: ";
+    for (size_t i = 0; i < std::min(size_t(8), frame.data.size()); i++) {
+        printf("%02x ", frame.data[i]);
+    }
+    std::cout << "(size=" << frame.data.size() << ")" << std::endl;
     frame.pts = header.pts;
     frame.dts = header.dts;
     frame.is_key_frame = (header.frame_type == FrameType::I_FRAME);
@@ -378,6 +552,47 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
             bool write_ok = video_writer_->WriteFrame(frame);
             if (!write_ok) {
                 std::cerr << "[VideoReceiver] Failed to write frame seq=" << header.frame_seq << "\n";
+            }
+        }
+        
+        // 写入实时显示管道（直接写入原始 H.264 Annex B 数据）
+        if (pipe_created_) {
+            // 如果管道还没有连接，尝试连接
+            if (pipe_fd_ < 0) {
+                pipe_fd_ = open(pipe_path_.c_str(), O_WRONLY | O_NONBLOCK);
+                if (pipe_fd_ >= 0) {
+                    std::cout << "[VideoReceiver] 播放器已连接，开始实时传输" << std::endl;
+                } else {
+                    if (header.frame_seq % 30 == 0) {
+                        std::cerr << "[VideoReceiver] 尝试连接管道失败: " << strerror(errno) << std::endl;
+                    }
+                }
+            }
+            
+            // 尝试写入
+            if (pipe_fd_ >= 0) {
+                // 首先写入 SPS/PPS（只在第一帧前写入一次）
+                WriteSpsPpsToPipe();
+                
+                // 将 AVCC 格式帧转换为 Annex B 格式再写入管道
+                std::vector<uint8_t> annexb_frame = ConvertAvccFrameToAnnexB(
+                    frame.data.data(), frame.data.size(), avcc_length_size_);
+                
+                ssize_t written = write(pipe_fd_, annexb_frame.data(), annexb_frame.size());
+                
+                if (written == static_cast<ssize_t>(annexb_frame.size())) {
+                    if (header.frame_seq % 30 == 0) {
+                        std::cout << "[VideoReceiver] Live pipe: frame " << header.frame_seq 
+                                  << " (" << annexb_frame.size() << " bytes)" << std::endl;
+                    }
+                } else {
+                    std::cerr << "[VideoReceiver] 写入管道失败: written=" << written 
+                              << ", expected=" << annexb_frame.size() << ", errno=" << errno << std::endl;
+                    if (errno == EAGAIN || errno == EPIPE) {
+                        close(pipe_fd_);
+                        pipe_fd_ = -1;
+                    }
+                }
             }
         }
         

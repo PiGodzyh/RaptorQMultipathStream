@@ -77,6 +77,13 @@ public:
      * @return 是否成功
      */
     bool CreateOutputFile(const std::string& filepath);
+    
+    /**
+     * 创建实时显示管道（用于 ffplay 实时播放）
+     * @param pipe_path 管道路径，默认 /tmp/video_live.h264
+     * @return 是否成功
+     */
+    bool CreateLivePipe(const std::string& pipe_path = "/tmp/video_live.h264");
 
     /**
      * 关闭输出文件
@@ -135,9 +142,19 @@ private:
     std::unique_ptr<VideoCodec::VideoWriter> video_writer_;
     bool output_opened_;
     
+    // 实时显示管道
+    std::string pipe_path_;
+    int pipe_fd_ = -1;  // -1 表示未打开
+    bool pipe_created_ = false;
+    bool sps_pps_written_ = false;  // 是否已经写入SPS/PPS
+    
+    // 写入SPS/PPS到管道（H.264 Annex B格式）
+    bool WriteSpsPpsToPipe();
+    
     // 视频配置
     VideoConfig video_config_;
-    std::vector<uint8_t> extradata_;
+    std::vector<uint8_t> extradata_;           // 原始 AVCC extradata
+    int avcc_length_size_ = 4;                 // AVCC length 字段大小
     bool config_received_;
     mutable std::mutex config_mutex_;
     
