@@ -332,6 +332,31 @@ ffmpeg -f lavfi -i testsrc=duration=5:size=1280x720:rate=30 -pix_fmt yuv420p inp
 ffplay output.mp4
 ```
 
+### 实时浏览器查看（推荐）
+
+使用一键启动脚本，自动启动接收端 + HTTP MJPEG 流服务器 + 发送端，浏览器直接观看：
+
+```bash
+# 一键启动（本地测试，默认使用 data/videos/test_gop1s.mp4）
+./start_live_view.sh
+
+# 指定发送端 IP（如局域网另一台机器）
+./start_live_view.sh 192.168.1.100
+
+# 指定其他视频文件
+./start_live_view.sh 127.0.0.1 other_video.mp4
+```
+
+然后用浏览器打开输出的地址即可观看：
+```
+http://127.0.0.1:8080
+```
+
+**脚本内部流程：**
+```
+接收端(9001) → FIFO管道 → ffmpeg解码MJPEG → Python HTTP服务器(8080) → 浏览器
+```
+
 ### 使用说明
 
 **接收端参数:**
@@ -512,6 +537,24 @@ file output/voice/received.wav
 
 # 终端2 - 发送端（从 data/videos/ 读取）
 ./build/multi_streaming_demo sender video 127.0.0.1 9001 input.mp4
+```
+
+**一键启动实时浏览器查看（推荐）**
+```bash
+# 启动接收端、HTTP服务器、发送端，浏览器访问 http://127.0.0.1:8080
+./start_live_view.sh
+
+# 自定义发送端 IP 和视频文件
+./start_live_view.sh 192.168.1.100 data/videos/test.mp4
+```
+
+**点云实时3D显示（PCL弹窗）**
+```bash
+# 接收端启动时会自动弹出PCL窗口，按高度着色实时显示（蓝色→红色）
+./build/multi_streaming_demo receiver pointcloud 9002
+
+# 发送测试点云
+./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 test
 ```
 
 **语音传输（独立程序）**

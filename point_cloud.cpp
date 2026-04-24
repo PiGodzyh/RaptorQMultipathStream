@@ -223,6 +223,9 @@ PointCloudReceiver::~PointCloudReceiver() {
 void PointCloudReceiver::Start() {
     running_ = true;
     
+    // 启动PCL实时可视化
+    StartViewer();
+    
     // 设置解码回调（使用多回调注册API）
     callback_id_ = unified_receiver_->registerDecodeCallback([this](DataPriority priority, uint32_t stream_id,
                                                  const std::vector<uint8_t>& data) {
@@ -233,11 +236,15 @@ void PointCloudReceiver::Start() {
     
     std::cout << "========================================" << std::endl;
     std::cout << "   点云接收端" << std::endl;
+    std::cout << "   PCL 实时可视化: 已启动" << std::endl;
     std::cout << "========================================" << std::endl;
 }
 
 void PointCloudReceiver::Stop() {
     running_ = false;
+    
+    // 停止可视化
+    StopViewer();
     
     // 注销回调
     if (callback_id_ >= 0) {
@@ -299,6 +306,9 @@ void PointCloudReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_
                                    points.begin(), points.end());
     }
     
+    // 更新PCL实时可视化
+    UpdateViewer(points);
+    
     // 每10帧保存一次
     if (stats_.frames_received % 10 == 0) {
         std::vector<PointCloudPoint> points_to_save;
@@ -358,6 +368,81 @@ void PointCloudReceiver::SavePointCloud(const std::vector<PointCloudPoint>& poin
     
     output_file_.flush();
     std::cout << "[点云] 保存 " << points.size() << " 点到 " << filepath << std::endl;
+}
+
+// ============================================================================
+// PCL 实时可视化
+// ============================================================================
+
+void PointCloudReceiver::StartViewer() {
+    viewer_running_ = true;
+    cloud_buffer_.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
+    
+    viewer_thread_ = std::thread([this]() {
+        viewer_.reset(new pcl::visualization::PCLVisualizer("Point Cloud Viewer"));
+        viewer_->setBackgroundColor(0.05, 0.05, 0.05);
+        viewer_->addCoordinateSystem(1.0);
+        viewer_->initCameraParameters();
+        viewer_->setCameraPosition(0, 0, 30, 0, 0, 0, 0, 1, 0);
+        viewer_->setShowFPS(true);
+        
+        viewer_ready_ = true;
+        std::cout << "[PCL] Viewer started" << std::endl;
+        
+        while (viewer_running_ && !viewer_->wasStopped()) {
+            {
+                std::lock_guard<std::mutex> lock(viewer_mutex_);
+                if (!cloud_buffer_->empty()) {
+                    if (!viewer_->updatePointCloud(cloud_buffer_, "cloud")) {
+                        viewer_->addPointCloud<pcl::PointXYZRGB>(cloud_buffer_, "cloud");
+                        viewer_->setPointCloudRenderingProperties(
+                            pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "cloud");
+                    }
+                }
+            }
+            viewer_->spinOnce(50);
+        }
+        
+        std::cout << "[PCL] Viewer stopped" << std::endl;
+    });
+    
+    // 等待视窗初始化
+    int wait = 0;
+    while (!viewer_ready_ && wait < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        wait++;
+    }
+}
+
+void PointCloudReceiver::StopViewer() {
+    viewer_running_ = false;
+    if (viewer_thread_.joinable()) {
+        viewer_thread_.join();
+    }
+    if (viewer_) {
+        viewer_->close();
+    }
+}
+
+void PointCloudReceiver::UpdateViewer(const std::vector<PointCloudPoint>& points) {
+    if (!viewer_ready_) return;
+    
+    std::lock_guard<std::mutex> lock(viewer_mutex_);
+    cloud_buffer_->clear();
+    cloud_buffer_->reserve(points.size());
+    
+    for (const auto& pt : points) {
+        pcl::PointXYZRGB p;
+        p.x = pt.x;
+        p.y = pt.y;
+        p.z = pt.z;
+        // 根据高度(z) 设置颜色：低处蓝色，高处红色
+        float z_norm = std::max(-10.0f, std::min(10.0f, pt.z)) / 10.0f;
+        p.r = static_cast<uint8_t>((z_norm + 1.0f) * 0.5f * 255);
+        p.g = static_cast<uint8_t>((1.0f - std::abs(z_norm)) * 255);
+        p.b = static_cast<uint8_t>((1.0f - z_norm) * 0.5f * 255);
+        cloud_buffer_->push_back(p);
+    }
 }
 
 } // namespace DataTransmit

@@ -18,6 +18,10 @@
 #include <thread>
 #include <fstream>
 
+// PCL 实时可视化
+#include <pcl/point_types.h>
+#include <pcl/visualization/pcl_visualizer.h>
+
 namespace DataTransmit {
 
 // ============================================================================
@@ -91,6 +95,11 @@ private:
     // 保存点云到文件
     void SavePointCloud(const std::vector<PointCloudPoint>& points);
     
+    // PCL 实时可视化
+    void StartViewer();
+    void StopViewer();
+    void UpdateViewer(const std::vector<PointCloudPoint>& points);
+    
     std::shared_ptr<DataTransmit::UnifiedReceiver> unified_receiver_;
     int callback_id_ = -1;  // 回调注册ID
     std::atomic<bool> running_{false};
@@ -101,6 +110,14 @@ private:
     Stats stats_;
     std::vector<PointCloudPoint> accumulated_points_;
     std::mutex points_mutex_;
+    
+    // PCL 可视化成员
+    pcl::visualization::PCLVisualizer::Ptr viewer_;
+    std::thread viewer_thread_;
+    std::mutex viewer_mutex_;
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_buffer_;
+    std::atomic<bool> viewer_running_{false};
+    std::atomic<bool> viewer_ready_{false};
 };
 
 } // namespace DataTransmit

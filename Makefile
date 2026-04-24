@@ -9,7 +9,7 @@ CXX = g++
 CXXFLAGS = -std=c++14 -Wall -O2 -fPIC
 INCLUDES = -I. -I./pack -I./network -I./event_base -I./libRaptorQ/src -I./VideoCodec -I./VoiceCodec
 # -rpath 让运行时从项目内找到 libRaptorQ，无需设置 LD_LIBRARY_PATH
-LDFLAGS = -L./libRaptorQ/build/lib -Wl,-rpath,'$$ORIGIN/../libRaptorQ/build/lib'
+LDFLAGS = -L./libRaptorQ/build/lib -Wl,-rpath,'$$ORIGIN/../libRaptorQ/build/lib' -Wl,--no-as-needed
 
 # 库
 LIBS = -lRaptorQ -lpthread
@@ -20,9 +20,16 @@ LIBEVENT_LIBS := $(shell pkg-config --libs libevent 2>/dev/null || echo "-levent
 FFMPEG_CFLAGS := $(shell pkg-config --cflags libavcodec libavformat libavutil 2>/dev/null || echo "")
 FFMPEG_LIBS := $(shell pkg-config --libs libavcodec libavformat libavutil 2>/dev/null || echo "-lavcodec -lavformat -lavutil")
 
-INCLUDES += $(LIBEVENT_CFLAGS) $(FFMPEG_CFLAGS)
+# PCL (点云可视化)
+PCL_CFLAGS := $(shell pkg-config --cflags pcl_common pcl_visualization 2>/dev/null || echo "")
+PCL_LIBS := $(shell pkg-config --libs pcl_common pcl_visualization 2>/dev/null || echo "")
+# VTK 头文件和库（PCL visualization 依赖，自动检测所有 VTK 库）
+VTK_CFLAGS := -I/usr/include/vtk-9.1
+VTK_LIBS := $(shell ldd /usr/lib/x86_64-linux-gnu/libpcl_visualization.so 2>/dev/null | grep 'libvtk' | awk '{print $$1}' | sed 's/^lib/-l/; s/\.so\.[0-9]*$$//' | sort -u | tr '\n' ' ')
+
+INCLUDES += $(LIBEVENT_CFLAGS) $(FFMPEG_CFLAGS) $(PCL_CFLAGS) $(VTK_CFLAGS)
 LDFLAGS  += $(shell pkg-config --libs --libs-only-L libevent 2>/dev/null || echo "-L/usr/lib")
-LIBS    += $(LIBEVENT_LIBS) $(FFMPEG_LIBS)
+LIBS    += $(LIBEVENT_LIBS) $(FFMPEG_LIBS) $(PCL_LIBS) $(VTK_LIBS) $(VTK_LIBS)
 
 # 构建目录
 BUILD_DIR = build
