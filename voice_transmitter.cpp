@@ -20,6 +20,13 @@ VoiceTransmitter::VoiceTransmitter(const std::string& server_addr, uint16_t serv
     , server_port_(server_port) {
 }
 
+VoiceTransmitter::VoiceTransmitter(std::shared_ptr<UnifiedSender> unified_sender)
+    : unified_sender_(unified_sender)
+    , reader_(std::make_unique<VoiceCodec::VoiceReader>())
+    , server_addr_("shared")
+    , server_port_(9004) {
+}
+
 VoiceTransmitter::~VoiceTransmitter() {
     Stop();
 }
@@ -51,11 +58,11 @@ void VoiceTransmitter::Start() {
     std::cout << "Frame interval: " << VoiceCodec::kFrameDurationMs << "ms" << std::endl;
     std::cout << "========================================" << std::endl;
     
-    // 启动 Sender
-    sender_->start();
-    
-    // 设置最小发送间隔（尽快发送）
-    sender_->setSendInterval(100);  // 100微秒，最小延迟
+    // 启动独立Sender（UnifiedSender模式下由外部管理）
+    if (sender_) {
+        sender_->start();
+        sender_->setSendInterval(100);  // 100微秒，最小延迟
+    }
     
     // 启动发送线程
     transmit_thread_ = std::thread([this]() { TransmitLoop(); });
@@ -73,8 +80,10 @@ void VoiceTransmitter::Stop() {
         transmit_thread_.join();
     }
     
-    // 停止 Sender
-    sender_->stop();
+    // 停止独立Sender（UnifiedSender模式下由外部管理）
+    if (sender_) {
+        sender_->stop();
+    }
     
     // 关闭文件
     reader_->Close();
@@ -93,13 +102,17 @@ void VoiceTransmitter::Stop() {
 }
 
 void VoiceTransmitter::TransmitLoop() {
-    std::cout << "[VoiceTransmitter] Transmit loop started (fast mode)" << std::endl;
+    std::cout << "[VoiceTransmitter] Transmit loop started" << std::endl;
     
     const uint32_t total_frames = reader_->GetTotalFrames();
     auto start_time = std::chrono::steady_clock::now();
     
     // 首先发送音频配置（stream_id=0）
     SendConfig();
+    
+    // 按帧率发送：20ms/帧
+    auto next_frame_time = std::chrono::steady_clock::now();
+    const auto frame_interval = std::chrono::milliseconds(VoiceCodec::kFrameDurationMs);
     
     while (running_ && !reader_->IsEndOfFile()) {
         // 读取一帧
@@ -124,6 +137,10 @@ void VoiceTransmitter::TransmitLoop() {
                           << " (" << progress << "%)" << std::endl;
             }
         }
+        
+        // 按帧率间隔发送，避免全速读取导致发送不均匀
+        next_frame_time += frame_interval;
+        std::this_thread::sleep_until(next_frame_time);
     }
     
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -131,8 +148,8 @@ void VoiceTransmitter::TransmitLoop() {
     
     std::cout << "[VoiceTransmitter] Transmit loop finished in " << duration << " ms" << std::endl;
     
-    // 等待所有符号发送完成
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // 等待 UnifiedSender 内部队列排空
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
     running_ = false;
 }
@@ -171,27 +188,37 @@ void VoiceTransmitter::SendConfig() {
     repair_count = std::max(1u, repair_count);
     auto symbols = encoder.encodeAll(repair_count);
     
-    // 发送配置（stream_id=0）
-    sender_->sendSymbols(0, symbols, packet.size(), symbol_size);
+    if (unified_sender_) {
+        unified_sender_->send(DataPriority::VOICE, 0, packet);
+    } else if (sender_) {
+        sender_->sendSymbols(0, symbols, packet.size(), symbol_size);
+    }
 }
 
 void VoiceTransmitter::SendFrame(const VoiceCodec::VoiceFrame& audio_frame) {
     // 构建网络包
     auto packet = BuildPacket(audio_frame);
     
-    // RaptorQ 编码（语音：5%冗余，低可靠性）
-    uint16_t symbol_size = 256;
-    float redundancy = 0.05f;
-    
-    RQPack::Encoder encoder(packet.data(), packet.size(), symbol_size);
-    uint32_t source_count = encoder.getSourceSymbolCount();
-    uint32_t repair_count = static_cast<uint32_t>(source_count * redundancy);
-    repair_count = std::max(1u, repair_count);  // 至少1个修复符号
-    auto symbols = encoder.encodeAll(repair_count);
-    
-    // 发送符号
     uint32_t stream_id = audio_frame.seq + 1;  // stream_id 从1开始
-    bool sent = sender_->sendSymbols(stream_id, symbols, packet.size(), symbol_size);
+    bool sent = false;
+    
+    if (unified_sender_) {
+        // UnifiedSender 模式下：直接发送原始数据，内部会自动进行 RaptorQ 编码和调度
+        // 跳过冗余的本地 RaptorQ 编码，避免 CPU 浪费
+        sent = unified_sender_->send(DataPriority::VOICE, stream_id, packet);
+    } else if (sender_) {
+        // 独立 Sender 模式下：需要本地进行 RaptorQ 编码
+        uint16_t symbol_size = 256;
+        float redundancy = 0.05f;
+        
+        RQPack::Encoder encoder(packet.data(), packet.size(), symbol_size);
+        uint32_t source_count = encoder.getSourceSymbolCount();
+        uint32_t repair_count = static_cast<uint32_t>(source_count * redundancy);
+        repair_count = std::max(1u, repair_count);
+        auto symbols = encoder.encodeAll(repair_count);
+        
+        sent = sender_->sendSymbols(stream_id, symbols, packet.size(), symbol_size);
+    }
     
     if (sent) {
         std::lock_guard<std::mutex> lock(stats_mutex_);

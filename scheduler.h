@@ -196,6 +196,11 @@ private:
      * 获取权重
      */
     uint32_t getWeight(DataPriority priority) const;
+    
+    /**
+     * 检查总带宽是否超限（基于 current_bandwidth_kbps 统计）
+     */
+    bool isTotalBandwidthExceeded() const;
 
 private:
     SchedulerConfig config_;

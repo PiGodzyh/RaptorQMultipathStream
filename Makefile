@@ -80,11 +80,16 @@ BLOCK_PARTITION_TEST_SRC = block_partition_test.cpp unified_sender.cpp unified_r
                            sender.cpp send_center.cpp \
                            send_buffer.cpp scheduler.cpp block_partition.cpp feedback.cpp reorder_buffer.cpp
 
-# 多流并发测试 - 源文件
-MULTI_STREAM_TEST_SRC = multi_stream_test.cpp unified_sender.cpp unified_receiver.cpp \
-                        receiver.cpp receiver_center.cpp \
+# 多流并发演示 - 源文件
+RAPTORQ_DEMO_SRC = raptorq_demo.cpp video_transmitter.cpp video_receiver.cpp \
+                        voice_transmitter.cpp voice_receiver.cpp \
+                        fc_control.cpp point_cloud.cpp grid_map.cpp \
                         sender.cpp send_center.cpp \
-                        send_buffer.cpp scheduler.cpp block_partition.cpp feedback.cpp reorder_buffer.cpp
+                        receiver.cpp receiver_center.cpp \
+                        unified_sender.cpp unified_receiver.cpp \
+                        send_buffer.cpp scheduler.cpp block_partition.cpp feedback.cpp reorder_buffer.cpp \
+                        video_reader.cpp video_writer.cpp \
+                        voice_codec.cpp voice_reader.cpp
 
 # SendBuffer 测试 - 源文件
 SENDBUFFER_TEST_SRC = send_buffer_test.cpp send_buffer.cpp
@@ -123,7 +128,7 @@ VOICE_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(VOICE_STREAMING_SRC:.cpp=.o)
 MULTI_STREAMING_OBJS = $(addprefix $(BUILD_DIR)/, $(MULTI_STREAMING_SRC:.cpp=.o))
 UNIFIED_RECEIVER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(UNIFIED_RECEIVER_TEST_SRC:.cpp=.o))
 BLOCK_PARTITION_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(BLOCK_PARTITION_TEST_SRC:.cpp=.o))
-MULTI_STREAM_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(MULTI_STREAM_TEST_SRC:.cpp=.o))
+RAPTORQ_DEMO_OBJS = $(addprefix $(BUILD_DIR)/, $(RAPTORQ_DEMO_SRC:.cpp=.o))
 SENDBUFFER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(SENDBUFFER_TEST_SRC:.cpp=.o))
 SCHEDULER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(SCHEDULER_TEST_SRC:.cpp=.o))
 REORDER_TEST_OBJS = $(addprefix $(BUILD_DIR)/, $(REORDER_TEST_SRC:.cpp=.o))
@@ -140,7 +145,7 @@ VIDEO_STREAMING_EXE = $(BUILD_DIR)/video_streaming_demo
 VOICE_STREAMING_EXE = $(BUILD_DIR)/voice_demo
 MULTI_STREAMING_EXE = $(BUILD_DIR)/multi_streaming_demo
 UNIFIED_RECEIVER_TEST_EXE = $(BUILD_DIR)/unified_receiver_test
-MULTI_STREAM_TEST_EXE = $(BUILD_DIR)/multi_stream_test
+RAPTORQ_DEMO_EXE = $(BUILD_DIR)/raptorq_demo
 BLOCK_PARTITION_TEST_EXE = $(BUILD_DIR)/block_partition_test
 SENDBUFFER_TEST_EXE = $(BUILD_DIR)/send_buffer_test
 SCHEDULER_TEST_EXE = $(BUILD_DIR)/scheduler_test
@@ -574,19 +579,20 @@ $(BUILD_DIR)/block_partition_test.o: block_partition_test.cpp unified_sender.h u
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # 多数据流并发传输测试
-$(MULTI_STREAM_TEST_EXE): $(MULTI_STREAM_TEST_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB) $(VIDEO_CODEC_OBJS) $(VOICE_CODEC_OBJS)
-	@echo "链接多数据流并发测试程序..."
+$(RAPTORQ_DEMO_EXE): $(RAPTORQ_DEMO_OBJS) $(NETWORK_OBJS) $(EVENT_OBJS) $(PACK_LIB) $(VIDEO_CODEC_OBJS) $(VOICE_CODEC_OBJS)
+	@echo "链接 RaptorQ 多流演示程序..."
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS) -lpthread
-	@echo "✓ 多数据流并发测试程序编译完成"
+	@echo "✓ RaptorQ 多流演示程序编译完成"
 
-$(BUILD_DIR)/multi_stream_test.o: multi_stream_test.cpp unified_sender.h unified_receiver.h \
+$(BUILD_DIR)/raptorq_demo.o: raptorq_demo.cpp unified_sender.h unified_receiver.h \
         voice_transmitter.h video_transmitter.h point_cloud.h grid_map.h fc_control.h
-	@echo "编译 multi_stream_test.cpp..."
+	@echo "编译 raptorq_demo.cpp..."
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 .PHONY: blockpartition
 blockpartition: check-deps $(BUILD_DIR) $(BLOCK_PARTITION_TEST_EXE)
 
-.PHONY: multistream multi_streaming_demo
-multistream: check-deps $(BUILD_DIR) $(MULTI_STREAM_TEST_EXE)
+.PHONY: raptorq_demo multistream multi_streaming_demo
+raptorq_demo: check-deps $(BUILD_DIR) $(RAPTORQ_DEMO_EXE)
+multistream: check-deps $(BUILD_DIR) $(RAPTORQ_DEMO_EXE)
 multi_streaming_demo: check-deps $(BUILD_DIR) $(MULTI_STREAMING_EXE)

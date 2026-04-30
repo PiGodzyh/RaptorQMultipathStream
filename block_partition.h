@@ -30,6 +30,7 @@ struct BlockPolicy {
     size_t target_block_size = 32 * 1024; // 目标块大小 32KB
     uint32_t max_aggregation = 5;         // 最大聚合帧数
     uint32_t aggregation_timeout_ms = 10; // 聚合超时 10ms
+    bool enable_aggregation = false;      // 是否启用小帧聚合（默认关闭，低延迟场景用）
     
     BlockPolicy() {}
 };

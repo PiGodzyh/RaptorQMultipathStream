@@ -119,6 +119,10 @@ private:
     AVPacket* packet_;
     std::vector<uint8_t> extradata_;  // 保存的SPS/PPS数据
     
+    // Time base 转换（ffmpeg 可能调整 time_base）
+    int orig_tb_num_, orig_tb_den_;     // 原始 time_base = {fps_den, fps_num}
+    int stream_tb_num_, stream_tb_den_; // avformat_write_header 后的实际 time_base
+    
     // 内部方法
     bool InitOutput(const std::string& filepath);
     bool WritePacket(const uint8_t* data, size_t size, 

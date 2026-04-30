@@ -21,3 +21,4 @@ integrated_test.cpp
 integrated_demo.cpp
 feedback_test.cpp
 block_partition_test.cpp
+frame_trace.log

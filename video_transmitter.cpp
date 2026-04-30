@@ -5,6 +5,7 @@
 #include "video_transmitter.h"
 #include "pack/rq_pack.h"
 #include "common.h"
+#include "log.h"
 
 #include <iostream>
 #include <cstring>
@@ -256,11 +257,11 @@ bool VideoTransmitter::SendFrame(const VideoCodec::EncodedFrame& frame) {
         send_callback_(frame_seq, frame_type, frame_data.size(), true);
     }
     
-    // 打印进度
-    if (frame_seq % 30 == 0) {
-        std::cout << "VideoTransmitter: Sent frame " << frame_seq 
+    // 打印进度（DEBUG级别，每300帧打印一次，避免淹没终端）
+    if (frame_seq % 300 == 0) {
+        LOG_MODULE_DEBUG(DataPriority::VIDEO, "Sent frame " << frame_seq 
                   << " (" << VideoCodec::FrameTypeToString(static_cast<VideoCodec::FrameType>(frame.type))
-                  << ", " << frame.data.size() << " bytes)" << std::endl;
+                  << ", " << frame.data.size() << " bytes)");
     }
     
     return true;

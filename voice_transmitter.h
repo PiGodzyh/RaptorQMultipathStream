@@ -10,6 +10,7 @@
 
 #include "data_common.h"
 #include "sender.h"
+#include "unified_sender.h"
 #include "VoiceCodec/voice_reader.h"
 #include <atomic>
 #include <thread>
@@ -41,12 +42,19 @@ struct VoiceFrameHeader {
 class VoiceTransmitter {
 public:
     /**
-     * 构造函数
+     * 构造函数（独立Sender模式）
      * @param server_addr 目标地址
      * @param server_port 目标端口（默认9004）
      */
     VoiceTransmitter(const std::string& server_addr, 
                      uint16_t server_port = 9004);
+    
+    /**
+     * 构造函数（UnifiedSender模式）
+     * @param unified_sender 共享的统一发送器
+     */
+    VoiceTransmitter(std::shared_ptr<UnifiedSender> unified_sender);
+    
     ~VoiceTransmitter();
     
     /**
@@ -101,6 +109,7 @@ private:
     std::vector<uint8_t> BuildPacket(const VoiceCodec::VoiceFrame& audio_frame);
     
     std::unique_ptr<Sender> sender_;
+    std::shared_ptr<UnifiedSender> unified_sender_;
     std::unique_ptr<VoiceCodec::VoiceReader> reader_;
     
     std::string server_addr_;

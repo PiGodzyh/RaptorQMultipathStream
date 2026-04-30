@@ -110,6 +110,11 @@ size_t TransmissionScheduler::scheduleStrictPriority() {
     size_t scheduled = 0;
     SendTask task;
     
+    // 先检查总带宽限制
+    if (isTotalBandwidthExceeded()) {
+        return scheduled;
+    }
+    
     // 按优先级顺序（FC=0 最高，PointCloud=3 最低）
     for (int i = 0; i < 5; ++i) {
         auto priority = static_cast<DataPriority>(i);
@@ -145,6 +150,11 @@ size_t TransmissionScheduler::scheduleStrictPriority() {
 size_t TransmissionScheduler::scheduleWeightedRoundRobin() {
     size_t scheduled = 0;
     SendTask task;
+    
+    // 先检查总带宽限制
+    if (isTotalBandwidthExceeded()) {
+        return scheduled;
+    }
     
     // 找到下一个有权重且有数据的服务
     for (int attempts = 0; attempts < 5; ++attempts) {
@@ -192,6 +202,11 @@ size_t TransmissionScheduler::scheduleWeightedRoundRobin() {
 }
 
 size_t TransmissionScheduler::scheduleBandwidthRatio() {
+    // 先检查总带宽限制
+    if (isTotalBandwidthExceeded()) {
+        return 0;
+    }
+    
     // 计算总带宽使用比例，优先发送使用率低于配额的数据类型
     double min_ratio = 2.0;
     int selected = -1;
@@ -331,6 +346,17 @@ void TransmissionScheduler::updateBandwidthStats() {
         stats_.queue_sizes[i] = static_cast<uint32_t>(
             buffer_->getQueueSize(static_cast<DataPriority>(i)));
     }
+}
+
+bool TransmissionScheduler::isTotalBandwidthExceeded() const {
+    if (config_.total_bandwidth_kbps == 0) return false;
+    
+    std::lock_guard<std::mutex> lock(stat_mutex_);
+    double total = 0;
+    for (int i = 0; i < 5; ++i) {
+        total += stats_.current_bandwidth_kbps[i];
+    }
+    return total >= config_.total_bandwidth_kbps;
 }
 
 uint32_t TransmissionScheduler::getWeight(DataPriority priority) const {

@@ -174,8 +174,8 @@ void VoiceReceiver::ProcessLoop() {
         
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            // 等待数据，最多等待 100ms
-            timeout = !queue_cv_.wait_for(lock, std::chrono::milliseconds(100), 
+            // 等待数据，最多等待 200ms（放宽超时，降低误判丢包概率）
+            timeout = !queue_cv_.wait_for(lock, std::chrono::milliseconds(200), 
                 [this] { return !receive_queue_.empty() || !running_; });
             
             if (!running_) break;
@@ -189,9 +189,18 @@ void VoiceReceiver::ProcessLoop() {
         // 确保写入器已初始化
         if (!writer_->IsOpen()) {
             if (!data.empty()) {
-                std::cerr << "[VoiceReceiver] Writer not initialized yet, dropping frame" << std::endl;
+                // 尝试再次初始化（配置包可能刚到）
+                if (InitWriter()) {
+                    // 成功，继续处理当前帧
+                } else {
+                    // 失败，把帧放回队列等待下次处理
+                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                    receive_queue_.push(std::move(data));
+                    continue;
+                }
+            } else {
+                continue;
             }
-            continue;
         }
         
         // 初始化静音帧（根据实际音频参数）
@@ -208,7 +217,7 @@ void VoiceReceiver::ProcessLoop() {
             if (oldest_seq > next_write_seq_) {
                 // 丢失帧数 = 期望帧 - 最老缓存帧之间的差值
                 uint32_t lost_count = oldest_seq - next_write_seq_;
-                if (lost_count >= 5 && !silence_frame.empty()) {  // 如果丢失超过5帧，直接跳过
+                if (lost_count >= 10 && !silence_frame.empty()) {  // 如果丢失超过10帧，才填充静音（避免发送稍有延迟就填充）
                     std::cout << "[Voice] Skip " << lost_count << " lost frames, write silence" << std::endl;
                     for (uint32_t i = 0; i < lost_count && running_; i++) {
                         writer_->WritePcm(silence_frame);

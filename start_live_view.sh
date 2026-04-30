@@ -12,7 +12,7 @@ HTTP_PORT=8080
 
 # 清理旧进程
 pkill -f "live_http_server.py" 2>/dev/null
-pkill -f "multi_streaming_demo" 2>/dev/null
+pkill -f "raptorq_demo" 2>/dev/null
 sleep 1
 
 rm -f /tmp/video_live.h264
@@ -28,7 +28,7 @@ echo ""
 
 # 1. 启动接收端
 echo "[1/4] 启动接收端 (端口 9001)..."
-nohup ./build/multi_streaming_demo receiver video 9001 output_recv.mp4 > /tmp/receiver.log 2>&1 &
+nohup ./build/raptorq_demo receiver > /tmp/receiver.log 2>&1 &
 RECV_PID=$!
 disown
 sleep 2
@@ -50,7 +50,7 @@ fi
 
 # 4. 启动发送端
 echo "[4/4] 启动发送端 (发送至 $SENDER_IP:9001)..."
-nohup ./build/multi_streaming_demo sender video $SENDER_IP 9001 "$VIDEO_FILE" > /tmp/sender.log 2>&1 &
+nohup ./build/raptorq_demo sender $SENDER_IP video > /tmp/sender.log 2>&1 &
 SEND_PID=$!
 disown
 
@@ -103,5 +103,5 @@ echo "按 Ctrl+C 停止所有服务"
 echo ""
 
 # 等待中断
-trap 'echo ""; echo "正在停止所有服务..."; kill $RECV_PID $HTTP_PID $SEND_PID 2>/dev/null; pkill -f "live_http_server.py" 2>/dev/null; pkill -f "multi_streaming_demo" 2>/dev/null; echo "已停止"; exit 0' INT TERM
+trap 'echo ""; echo "正在停止所有服务..."; kill $RECV_PID $HTTP_PID $SEND_PID 2>/dev/null; pkill -f "live_http_server.py" 2>/dev/null; pkill -f "raptorq_demo" 2>/dev/null; echo "已停止"; exit 0' INT TERM
 wait

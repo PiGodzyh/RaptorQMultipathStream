@@ -84,6 +84,7 @@ public:
      * @return 是否成功
      */
     bool CreateLivePipe(const std::string& pipe_path = "/tmp/video_live.h264");
+    void CloseLivePipe();
 
     /**
      * 关闭输出文件
@@ -140,16 +141,19 @@ private:
     
     // 视频写入器
     std::unique_ptr<VideoCodec::VideoWriter> video_writer_;
-    bool output_opened_;
+    std::atomic<bool> output_opened_{false};
     
     // 实时显示管道
     std::string pipe_path_;
     int pipe_fd_ = -1;  // -1 表示未打开
-    bool pipe_created_ = false;
+    std::atomic<bool> pipe_created_{false};
     bool sps_pps_written_ = false;  // 是否已经写入SPS/PPS
     
     // 写入SPS/PPS到管道（H.264 Annex B格式）
     bool WriteSpsPpsToPipe();
+    
+    // 写入一帧到实时显示管道
+    bool WriteFrameToPipe(const VideoCodec::EncodedFrame& frame, uint32_t seq);
     
     // 视频配置
     VideoConfig video_config_;

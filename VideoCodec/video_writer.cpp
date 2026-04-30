@@ -15,6 +15,9 @@ extern "C" {
 
 #include <iostream>
 #include <cstring>
+#include <fstream>
+#include <chrono>
+#include <mutex>
 
 namespace VideoCodec {
 
@@ -24,7 +27,11 @@ VideoWriter::VideoWriter()
     , frame_count_(0)
     , fmt_ctx_(nullptr)
     , video_stream_(nullptr)
-    , packet_(nullptr) {
+    , packet_(nullptr)
+    , orig_tb_num_(0)
+    , orig_tb_den_(0)
+    , stream_tb_num_(0)
+    , stream_tb_den_(0) {
 }
 
 VideoWriter::~VideoWriter() {
@@ -38,12 +45,20 @@ VideoWriter::VideoWriter(VideoWriter&& other) noexcept
     , frame_count_(other.frame_count_)
     , fmt_ctx_(other.fmt_ctx_)
     , video_stream_(other.video_stream_)
-    , packet_(other.packet_) {
+    , packet_(other.packet_)
+    , orig_tb_num_(other.orig_tb_num_)
+    , orig_tb_den_(other.orig_tb_den_)
+    , stream_tb_num_(other.stream_tb_num_)
+    , stream_tb_den_(other.stream_tb_den_) {
     other.is_open_ = false;
     other.fmt_ctx_ = nullptr;
     other.video_stream_ = nullptr;
     other.packet_ = nullptr;
     other.frame_count_ = 0;
+    other.orig_tb_num_ = 0;
+    other.orig_tb_den_ = 0;
+    other.stream_tb_num_ = 0;
+    other.stream_tb_den_ = 0;
 }
 
 VideoWriter& VideoWriter::operator=(VideoWriter&& other) noexcept {
@@ -56,14 +71,34 @@ VideoWriter& VideoWriter::operator=(VideoWriter&& other) noexcept {
         fmt_ctx_ = other.fmt_ctx_;
         video_stream_ = other.video_stream_;
         packet_ = other.packet_;
+        orig_tb_num_ = other.orig_tb_num_;
+        orig_tb_den_ = other.orig_tb_den_;
+        stream_tb_num_ = other.stream_tb_num_;
+        stream_tb_den_ = other.stream_tb_den_;
         
         other.is_open_ = false;
         other.fmt_ctx_ = nullptr;
         other.video_stream_ = nullptr;
         other.packet_ = nullptr;
         other.frame_count_ = 0;
+        other.orig_tb_num_ = 0;
+        other.orig_tb_den_ = 0;
+        other.stream_tb_num_ = 0;
+        other.stream_tb_den_ = 0;
     }
     return *this;
+}
+
+// 帧追踪日志（调试用）
+static void FrameTraceLog(const std::string& msg) {
+    static std::mutex trace_mutex;
+    std::lock_guard<std::mutex> lock(trace_mutex);
+    std::ofstream ofs("frame_trace.log", std::ios::app);
+    if (ofs) {
+        auto now = std::chrono::steady_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        ofs << "[" << ms << "] " << msg << std::endl;
+    }
 }
 
 bool VideoWriter::Create(const std::string& filepath, const VideoParams& params) {
@@ -119,6 +154,8 @@ bool VideoWriter::InitOutput(const std::string& filepath) {
 
     // 设置流的time_base
     video_stream_->time_base = {video_params_.fps_den, video_params_.fps_num};
+    orig_tb_num_ = video_stream_->time_base.num;
+    orig_tb_den_ = video_stream_->time_base.den;
 
     // 设置codecpar为H.264
     video_stream_->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -163,6 +200,16 @@ bool VideoWriter::InitOutput(const std::string& filepath) {
         return false;
     }
 
+    // 记录 ffmpeg 调整后的实际 time_base
+    stream_tb_num_ = video_stream_->time_base.num;
+    stream_tb_den_ = video_stream_->time_base.den;
+    if (stream_tb_num_ != orig_tb_num_ || stream_tb_den_ != orig_tb_den_) {
+        std::cout << "  Time base adjusted by ffmpeg: "
+                  << orig_tb_num_ << "/" << orig_tb_den_
+                  << " -> " << stream_tb_num_ << "/" << stream_tb_den_
+                  << std::endl;
+    }
+
     return true;
 }
 
@@ -171,7 +218,14 @@ void VideoWriter::Close() {
         Flush();
         
         if (fmt_ctx_) {
-            av_write_trailer(fmt_ctx_);
+            int ret = av_write_trailer(fmt_ctx_);
+            if (ret < 0) {
+                char errbuf[256];
+                av_strerror(ret, errbuf, sizeof(errbuf));
+                std::cerr << "[VideoWriter] av_write_trailer failed: " << errbuf << std::endl;
+            } else {
+                std::cout << "[VideoWriter] Trailer written successfully" << std::endl;
+            }
         }
     }
 
@@ -228,25 +282,30 @@ bool VideoWriter::WritePacket(const uint8_t* data, size_t size,
 
     // 复制数据（从MP4读取的已经是AVCC格式，直接写入）
     memcpy(packet_->data, data, size);
-    
+
     // 转换毫秒到流的time_base
     int64_t pts = av_rescale_q(pts_ms, {1, 1000}, video_stream_->time_base);
-    
+
     // 使用单调递增的DTS（MP4 muxer要求DTS单调递增）
     int64_t dts = frame_count_;
-    
+
     // 设置packet属性
     packet_->pts = pts;
     packet_->dts = dts;
     packet_->stream_index = video_stream_->index;
     packet_->duration = av_rescale_q(1000 / video_params_.fps_num, {1, 1000}, video_stream_->time_base);
-    
+
     if (is_key_frame) {
         packet_->flags |= AV_PKT_FLAG_KEY;
     } else {
         packet_->flags = 0;
     }
 
+    FrameTraceLog("[WRITER] frame_count=" + std::to_string(frame_count_) +
+                  " pts=" + std::to_string(pts) +
+                  " dts=" + std::to_string(dts) +
+                  " key=" + std::to_string(is_key_frame) +
+                  " size=" + std::to_string(size));
     // 写入packet
     ret = av_interleaved_write_frame(fmt_ctx_, packet_);
     if (ret < 0) {
@@ -270,6 +329,14 @@ bool VideoWriter::Flush() {
 
     // 对于H.264透传，不需要特别刷新
     return true;
+}
+
+int64_t VideoWriter::ConvertMsToPts(int64_t ms) const {
+    if (!video_stream_ || ms < 0) {
+        return AV_NOPTS_VALUE;
+    }
+    AVRational ms_tb = {1, 1000};
+    return av_rescale_q(ms, ms_tb, {stream_tb_num_, stream_tb_den_});
 }
 
 std::string VideoWriter::GetLastErrorString() const {

@@ -17,10 +17,13 @@ bool BlockPartition::addFrame(DataPriority priority, uint64_t stream_id,
     size_t data_size = data->size();
     
     if (data_size > policy_.max_block_size) {
+        // 大包拆分
         splitLargeFrame(frame);
+    } else if (policy_.enable_aggregation && data_size < policy_.target_block_size) {
+        // 小包且启用了聚合：尝试聚合等待
+        tryAggregateFrame(frame);
     } else {
-        // 所有小于 max_block_size 的帧都直接发送，不做聚合等待
-        // 聚合会导致延迟，对实时数据不利
+        // 中包或聚合禁用：直接发送
         createSingleBlock(frame);
     }
     
