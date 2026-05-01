@@ -15,6 +15,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <functional>
+#include <fstream>
 
 #include "video_common.h"
 #include "VideoCodec/video_reader.h"
@@ -70,6 +71,7 @@ public:
      */
     void SetSendCallback(VideoSendCallback callback);
     void SetErrorCallback(VideoErrorCallback callback);
+    void SetLogFile(const std::string& path);
 
     /**
      * 检查是否正在运行
@@ -122,6 +124,10 @@ private:
     // 当前GOP状态
     uint32_t current_gop_id_;
     uint32_t frame_in_gop_;
+    
+    // 日志
+    std::ofstream log_file_;
+    std::mutex log_mutex_;
     
     // 发送线程函数
     void SendThreadFunc();

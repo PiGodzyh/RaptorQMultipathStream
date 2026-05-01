@@ -14,6 +14,7 @@
 #include "event_base/event_queue.h"
 #include "event_base/event_loop.h"
 #include "pack/rq_pack.h"
+#include "feedback.h"
 
 // 流解码器状态
 struct StreamDecoder {
@@ -58,6 +59,13 @@ class Receiver {
     
   void start();
   void stop();
+  
+  /**
+   * 设置是否 Bypass RaptorQ FEC 解码（直接接收原始数据）
+   * @param enable true 为 bypass 模式，false 为正常 RaptorQ 解码模式
+   */
+  void setBypassFec(bool enable);
+  void setDataPriority(DataPriority priority);
 
   /**
    * 获取接收到的数据包总数
@@ -127,6 +135,14 @@ class Receiver {
   std::vector<std::thread> worker_threads_;
     
   std::atomic<bool> running_;
+  bool bypass_fec_;  // 是否绕过 RaptorQ 解码
+  DataPriority priority_ = DataPriority::VIDEO;  // 数据优先级（用于反馈）
+  
+  // 反馈发送器
+  FeedbackSender feedback_sender_;
+  std::mutex sender_addrs_mutex_;
+  std::map<uint64_t, std::pair<std::string, uint16_t>> sender_addrs_;  // stream_id -> (addr, port)
+  
   // 队列初始化同步
   std::atomic<uint32_t> initialized_queues_{0};
   std::mutex init_mutex_;

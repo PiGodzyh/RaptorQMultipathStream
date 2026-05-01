@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 #include <mutex>
+#include <fstream>
 
 #include "data_common.h"
 #include "unified_receiver.h"
@@ -118,6 +119,12 @@ public:
      */
     bool GetVideoConfig(VideoConfig& config) const;
 
+    /**
+     * 设置是否 Bypass FEC 模式（UDP 乱序时不强制保序，直接写入）
+     */
+    void setBypassMode(bool bypass) { bypass_mode_ = bypass; }
+    void SetLogFile(const std::string& path);
+
 private:
     // 帧接收回调
     void OnFrameReceived(DataPriority priority, uint32_t stream_id, 
@@ -165,6 +172,9 @@ private:
     // 运行状态
     std::atomic<bool> running_;
     
+    // Bypass 模式标志
+    bool bypass_mode_ = false;
+    
     // 回调
     VideoFrameCallback frame_callback_;
     VideoConfigCallback config_callback_;
@@ -203,6 +213,10 @@ private:
     };
     FrameStats frame_stats_;
     mutable std::mutex frame_stats_mutex_;
+    
+    // 接收日志
+    std::ofstream log_file_;
+    std::mutex log_mutex_;
 };
 
 } // namespace VideoTransmit

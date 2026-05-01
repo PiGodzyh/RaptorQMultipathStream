@@ -37,16 +37,22 @@ public:
     
     // 发送单条指令（用于程序化调用）
     bool SendCommand(const std::string& command, uint8_t priority = FCControlHeader::PRIORITY_NORMAL);
+    
+    // 设置发送日志文件
+    void SetLogFile(const std::string& log_path);
 
 private:
     // 发送单帧
-    bool SendFrame(const FCControlPacket& packet, uint32_t seq);
+    bool SendFrame(const FCControlPacket& packet, uint32_t seq, uint64_t timestamp);
     
     std::shared_ptr<UnifiedSender> unified_sender_;
     std::atomic<uint32_t> seq_counter_{0};
     std::atomic<bool> running_{false};
     std::thread input_thread_;
     std::mutex send_mutex_;
+    
+    std::ofstream log_file_;
+    std::mutex log_mutex_;
 
 };
 

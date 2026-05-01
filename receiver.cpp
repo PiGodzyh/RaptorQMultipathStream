@@ -12,7 +12,8 @@ Receiver::Receiver(Visitor *visitor, uint16_t port, uint32_t thread_count)
     running_(false),
     received_count_(0),
     processed_count_(0),
-    decoded_stream_count_(0) {
+    decoded_stream_count_(0),
+    bypass_fec_(false) {
   server_.setReceiveCallback(std::bind(&Receiver::onReceive, this, std::placeholders::_1));
   server_.setErrorCallback(std::bind(&Receiver::onError, this, std::placeholders::_1));
   
@@ -63,8 +64,28 @@ void Receiver::start() {
       return;
   }
   
+  // 设置反馈发送回调
+  feedback_sender_.setSendCallback([this](const FeedbackPacket& packet) {
+      std::lock_guard<std::mutex> lock(sender_addrs_mutex_);
+      auto it = sender_addrs_.find(packet.stream_id);
+      if (it != sender_addrs_.end()) {
+          auto data = packet.serialize();
+          server_.sendTo(data, it->second.first, it->second.second);
+      }
+  });
+  feedback_sender_.start();
+  
   std::cout << "Receiver: 已启动 " << thread_count_ 
             << " 个工作线程（每个线程一个队列和 EventLoop）" << std::endl;
+}
+
+void Receiver::setBypassFec(bool enable) {
+  bypass_fec_ = enable;
+  std::cout << "Receiver: Bypass FEC " << (enable ? "启用" : "禁用") << std::endl;
+}
+
+void Receiver::setDataPriority(DataPriority priority) {
+  priority_ = priority;
 }
 
 void Receiver::stop() {
@@ -101,6 +122,9 @@ void Receiver::stop() {
   worker_threads_.clear();
   event_queues_.clear();
   
+  // 停止反馈发送器
+  feedback_sender_.stop();
+  
   std::cout << "Receiver: 已停止 (接收: " << received_count_ 
             << ", 处理: " << processed_count_ 
             << ", 解码完成: " << decoded_stream_count_ << ")" << std::endl;
@@ -108,6 +132,13 @@ void Receiver::stop() {
 
 void Receiver::onReceive(std::shared_ptr<Network::Packet> packet) {
   received_count_++;
+  
+  // 记录 sender 地址（用于反馈回传）
+  if (packet->data.size() >= sizeof(uint64_t)) {
+      uint64_t stream_id = *reinterpret_cast<const uint64_t*>(packet->data.data());
+      std::lock_guard<std::mutex> lock(sender_addrs_mutex_);
+      sender_addrs_[stream_id] = {packet->remote_addr, packet->remote_port};
+  }
   
   // 选择一个队列
   uint32_t queue_idx = selectQueue(packet);
@@ -167,6 +198,39 @@ void Receiver::eventLoopThread(uint32_t thread_id) {
 }
 
 void Receiver::processPacket(uint32_t thread_id, std::shared_ptr<Network::Packet>& packet) {
+  // Bypass 模式：直接递交原始数据，不解码
+  if (bypass_fec_) {
+    if (packet->data.size() < sizeof(BypassPacketHeader)) {
+      std::cerr << "[线程 " << thread_id << "] Bypass 数据包太小: " << packet->data.size() << std::endl;
+      return;
+    }
+    
+    BypassPacketHeader header;
+    std::memcpy(&header, packet->data.data(), sizeof(BypassPacketHeader));
+    
+    size_t data_offset = sizeof(BypassPacketHeader);
+    size_t data_length = header.data_length;
+    
+    if (data_offset + data_length > packet->data.size()) {
+      std::cerr << "[线程 " << thread_id << "] Bypass 数据长度异常: " 
+                << data_length << " > " << (packet->data.size() - data_offset) << std::endl;
+      return;
+    }
+    
+    std::vector<uint8_t> raw_data(packet->data.begin() + data_offset,
+                                   packet->data.begin() + data_offset + data_length);
+    
+    if (visitor_) {
+      visitor_->OnDecodeComplete(static_cast<uint32_t>(header.stream_id), raw_data);
+    }
+    decoded_stream_count_++;
+    if (static_cast<uint32_t>(header.stream_id) % 30 == 0) {
+      std::cout << "[Receiver Bypass] 收到原始数据，流 " << header.stream_id 
+                << ", 大小: " << raw_data.size() << " 字节" << std::endl;
+    }
+    return;
+  }
+  
   // 1. 检查数据包大小
   if (packet->data.size() < sizeof(PacketHeader)) {
     std::cerr << "[线程 " << thread_id << "] 数据包太小: " << packet->data.size() << std::endl;
@@ -230,6 +294,12 @@ void Receiver::processPacket(uint32_t thread_id, std::shared_ptr<Network::Packet
   if (added) {
     stream_decoder->received_symbols.insert(header.symbol_id);
     
+    // 上报反馈
+    feedback_sender_.setExpectedSymbols(header.stream_id, priority_, header.total_symbols);
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    feedback_sender_.reportSymbolReceived(header.stream_id, priority_, header.symbol_id, now_ms);
+    
     std::cout << "[线程 " << thread_id << "] 流 " << header.stream_id 
               << " 接收符号 #" << header.symbol_id 
               << " (" << stream_decoder->received_symbols.size() 
@@ -247,6 +317,10 @@ void Receiver::processPacket(uint32_t thread_id, std::shared_ptr<Network::Packet
       
       stream_decoder->decoded = true;
       decoded_stream_count_++;
+      
+      // 解码成功后，将 expected 设为 received，避免修复符号被计入丢失
+      uint32_t actual_received = stream_decoder->received_symbols.size();
+      feedback_sender_.setExpectedSymbols(header.stream_id, priority_, actual_received);
       
       std::cout << "[线程 " << thread_id << "] 流 " << header.stream_id 
                 << " 解码成功！数据大小: " << decoded_data.size() << " 字节" << std::endl;
@@ -267,7 +341,16 @@ void Receiver::processPacket(uint32_t thread_id, std::shared_ptr<Network::Packet
 }
 
 uint32_t Receiver::selectQueue(std::shared_ptr<Network::Packet> packet) {
-  // 解析数据包头部获取流ID
+  // Bypass 模式：直接读取前 8 字节作为 stream_id
+  if (bypass_fec_) {
+    if (packet->data.size() >= sizeof(uint64_t)) {
+      uint64_t stream_id = *reinterpret_cast<const uint64_t*>(packet->data.data());
+      return static_cast<uint32_t>(stream_id % thread_count_);
+    }
+    return received_count_.load() % thread_count_;
+  }
+  
+  // 正常模式：解析数据包头部获取流ID
   if (packet->data.size() < sizeof(PacketHeader)) {
     // 数据包太小，无法解析，使用轮询
     return received_count_.load() % thread_count_;
@@ -277,7 +360,7 @@ uint32_t Receiver::selectQueue(std::shared_ptr<Network::Packet> packet) {
   std::memcpy(&header, packet->data.data(), sizeof(PacketHeader));
   
   // 基于流ID哈希，确保同一流的所有包都在同一个线程处理
-  return header.stream_id % thread_count_;
+  return static_cast<uint32_t>(header.stream_id % thread_count_);
 }
 
 StreamDecoder* Receiver::getOrCreateDecoder(uint32_t thread_id, uint32_t stream_id,

@@ -60,7 +60,7 @@ static const char* FrameTypeToStr(FrameType type) {
 static void FrameTraceLog(const std::string& msg) {
     static std::mutex trace_mutex;
     std::lock_guard<std::mutex> lock(trace_mutex);
-    std::ofstream ofs("frame_trace.log", std::ios::app);
+    std::ofstream ofs("logs/debug/frame_trace.log", std::ios::app);
     if (ofs) {
         auto now = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -132,6 +132,13 @@ bool VideoReceiver::CreateOutputFile(const std::string& filepath) {
         CloseOutputFile();
     }
     
+    // Bypass 模式：不创建实际 MP4 文件，只标记输出就绪
+    if (bypass_mode_) {
+        output_opened_ = true;
+        std::cout << "VideoReceiver: Bypass mode, skip creating MP4 file" << std::endl;
+        return true;
+    }
+    
     // 等待视频配置（静默等待，不频繁打印）
     int retry = 0;
     while (!config_received_ && retry < 300) {
@@ -182,6 +189,10 @@ void VideoReceiver::CloseLivePipe() {
 }
 
 void VideoReceiver::CloseOutputFile() {
+    if (bypass_mode_) {
+        output_opened_ = false;
+        return;
+    }
     std::cout << "[VideoReceiver] CloseOutputFile called, output_opened_=" << output_opened_.load() << std::endl;
     if (output_opened_) {
         std::cout << "[VideoReceiver] Closing video writer..." << std::endl;
@@ -370,6 +381,14 @@ void VideoReceiver::SetErrorCallback(VideoErrorCallback callback) {
     error_callback_ = callback;
 }
 
+void VideoReceiver::SetLogFile(const std::string& path) {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+    log_file_.open(path, std::ios::app);
+}
+
 bool VideoReceiver::IsOutputOpen() const {
     return output_opened_;
 }
@@ -512,11 +531,34 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
     FrameType current_frame_type = header.frame_type;
     size_t current_frame_size = frame.data.size();
     
+    // 记录接收日志（网络到达时间，用于计算传输延迟）
+    {
+        std::lock_guard<std::mutex> log_lock(log_mutex_);
+        if (log_file_.is_open()) {
+            log_file_ << DataTransmit::GetCurrentTimestampUs() << "," << header.frame_seq << ","
+                      << (int)header.frame_type << "," << current_frame_size << std::endl;
+        }
+    }
+    
     std::vector<std::pair<uint32_t, VideoCodec::EncodedFrame>> frames_to_write;
     frames_to_write.reserve(1 + pending_frames_.size());
     
     {
         std::lock_guard<std::mutex> lock(frame_mutex_);
+        
+        // Bypass 模式：直接统计，不保序、不写文件、不缓存
+        if (bypass_mode_) {
+            std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+            stats_.frames_received++;
+            stats_.bytes_received += current_frame_size;
+            switch (current_frame_type) {
+                case FrameType::I_FRAME: stats_.i_frames_received++; break;
+                case FrameType::P_FRAME: stats_.p_frames_received++; break;
+                case FrameType::B_FRAME: stats_.b_frames_received++; break;
+                default: break;
+            }
+            return;
+        }
         
         // 如果是第一个视频帧（next_expected_frame_seq_ 为 0），直接接受它作为起始
         if (next_expected_frame_seq_ == 0) {
@@ -524,8 +566,7 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
             std::cout << "VideoReceiver: First frame received, starting from seq=" 
                       << header.frame_seq << std::endl;
         }
-        
-        if (header.frame_seq == next_expected_frame_seq_) {
+        else if (header.frame_seq == next_expected_frame_seq_) {
             // 期望的帧，直接处理
             should_process = true;
             next_expected_frame_seq_++;
@@ -554,7 +595,7 @@ void VideoReceiver::ProcessVideoFrame(const std::vector<uint8_t>& data) {
             pending_frames_[header.frame_seq] = std::move(frame);
             
             // 缓存过大时丢弃最旧的帧（避免无限等待）
-            if (pending_frames_.size() > 500) {
+            if (pending_frames_.size() > 120) {
                 // 丢弃最小的（最旧的）帧
                 auto it = pending_frames_.begin();
                 uint32_t dropped_seq = it->first;

@@ -302,6 +302,8 @@ bool UnifiedReceiver::start() {
         
         // 创建 Receiver（每个端口一个）
         pr.receiver = std::make_unique<Receiver>(visitor.get(), ports[i], 1);
+        pr.receiver->setBypassFec(bypass_fec_);
+        pr.receiver->setDataPriority(pr.priority);
         
         std::cout << "[UnifiedReceiver] Starting receiver on port " << ports[i] 
                   << " for " << PriorityToString(pr.priority) << std::endl;
@@ -321,6 +323,16 @@ bool UnifiedReceiver::start() {
     
     std::cout << "[UnifiedReceiver] All 5 receivers started" << std::endl;
     return true;
+}
+
+void UnifiedReceiver::setBypassFec(bool enable) {
+    bypass_fec_ = enable;
+    // 如果 Receiver 已创建，同步更新
+    for (auto& pr : port_receivers_) {
+        if (pr.receiver) {
+            pr.receiver->setBypassFec(enable);
+        }
+    }
 }
 
 void UnifiedReceiver::stop() {

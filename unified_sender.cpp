@@ -66,10 +66,16 @@ bool UnifiedSender::initialize() {
     feedback_controller_.setRedundancyCallback(
         [this](DataPriority priority, float redundancy) {
             int idx = static_cast<int>(priority);
-            if (idx >= 0 && idx < 5 && senders_[idx]) {
-                senders_[idx]->setRepairRatio(redundancy);
-                std::cout << "[UnifiedSender] FEC adjusted for priority " << idx 
-                          << ": " << (redundancy * 100) << "%" << std::endl;
+            if (idx >= 0 && idx < 5) {
+                if (manual_redundancy_[idx]) {
+                    // 手动设置了冗余度，跳过自适应调整
+                    return;
+                }
+                if (senders_[idx]) {
+                    senders_[idx]->setRepairRatio(redundancy);
+                    std::cout << "[UnifiedSender] FEC adjusted for priority " << idx
+                              << ": " << (redundancy * 100) << "%" << std::endl;
+                }
             }
         });
     
@@ -101,6 +107,15 @@ void UnifiedSender::start() {
     
     // 启动 Scheduler
     scheduler_.start();
+    
+    // 同步 Sender 初始冗余度到 FeedbackController
+    for (int i = 0; i < 5; ++i) {
+        auto priority = static_cast<DataPriority>(i);
+        if (senders_[i]) {
+            feedback_controller_.setInitialRedundancy(
+                priority, senders_[i]->getRepairRatio());
+        }
+    }
     
     // 启动 FeedbackController
     feedback_controller_.start();
@@ -142,25 +157,36 @@ void UnifiedSender::stop() {
     std::cout << "[UnifiedSender] Stopped" << std::endl;
 }
 
-bool UnifiedSender::send(DataPriority priority, uint64_t stream_id, 
+bool UnifiedSender::send(DataPriority priority, uint64_t stream_id,
                          std::shared_ptr<std::string> data) {
     if (!running_) {
         std::cerr << "[UnifiedSender] Not running!" << std::endl;
         return false;
     }
-    
+
     if (!data || data->empty()) {
         return false;
     }
-    
+
+    // Bypass 模式：跳过 BlockPartition，直接推入 SendBuffer
+    if (bypass_fec_) {
+        uint64_t seq = seq_counter_++;
+        SendTask task(priority, stream_id, data, seq);
+        if (send_buffer_.push(task, true)) {
+            total_frames_in_++;
+            total_blocks_out_++;  // bypass 下一帧即一块
+        }
+        return true;
+    }
+
     // 添加到 BlockPartition 进行分块/聚合
     uint64_t seq = seq_counter_++;
     bool ok = block_partition_.addFrame(priority, stream_id, seq, data);
-    
+
     if (ok) {
         total_frames_in_++;
     }
-    
+
     return ok;
 }
 
@@ -226,7 +252,7 @@ std::shared_ptr<Sender> UnifiedSender::createSender(DataPriority priority) {
             break;
         case DataPriority::VIDEO:
             symbol_size = 1024;
-            repair_ratio = 0.2f;
+            repair_ratio = 0.4f;
             break;
         case DataPriority::POINT_CLOUD:
             symbol_size = 1024;
@@ -240,6 +266,13 @@ std::shared_ptr<Sender> UnifiedSender::createSender(DataPriority priority) {
     
     auto sender = std::make_shared<Sender>(config_.target_ip, port, symbol_size);
     sender->setRepairRatio(repair_ratio);
+    manual_redundancy_[static_cast<int>(priority)] = true;  // 标记为手动设置，关闭自适应FEC
+    sender->setBypassFec(bypass_fec_);
+    
+    // 设置反馈回调
+    sender->setFeedbackCallback([this](const FeedbackPacket& feedback) {
+        this->onFeedbackReceived(feedback);
+    });
     
     return sender;
 }
@@ -259,11 +292,41 @@ void UnifiedSender::setRedundancy(DataPriority priority, float ratio) {
     int idx = static_cast<int>(priority);
     if (idx >= 0 && idx < 5 && senders_[idx]) {
         senders_[idx]->setRepairRatio(ratio);
+        manual_redundancy_[idx] = true;
     }
 }
 
 void UnifiedSender::setRateLimit(DataPriority priority, uint32_t kbps) {
     scheduler_.setBandwidthLimit(priority, kbps);
+}
+
+void UnifiedSender::setBypassFec(bool enable) {
+    bypass_fec_ = enable;
+    // 如果 Sender 已创建，同步更新
+    for (auto& sender : senders_) {
+        if (sender) {
+            sender->setBypassFec(enable);
+        }
+    }
+}
+
+void UnifiedSender::setDropRate(float rate) {
+    for (auto& sender : senders_) {
+        if (sender) {
+            sender->setDropRate(rate);
+        }
+    }
+}
+
+float UnifiedSender::getCurrentRedundancy(DataPriority priority) const {
+    return feedback_controller_.getCurrentRedundancy(priority);
+}
+
+void UnifiedSender::setNextRepairRatio(DataPriority priority, uint64_t stream_id, float ratio) {
+    int idx = static_cast<int>(priority);
+    if (idx >= 0 && idx < 5 && senders_[idx]) {
+        senders_[idx]->setNextRepairRatio(stream_id, ratio);
+    }
 }
 
 void UnifiedSender::onFeedbackReceived(const FeedbackPacket& feedback) {
@@ -280,4 +343,12 @@ void UnifiedSender::printStatistics() const {
     feedback_controller_.printStatistics();
     
     std::cout << "==============================================\n" << std::endl;
+}
+
+void UnifiedSender::SetLogFile(const std::string& path) {
+    for (auto& sender : senders_) {
+        if (sender) {
+            sender->SetLogFile(path);
+        }
+    }
 }

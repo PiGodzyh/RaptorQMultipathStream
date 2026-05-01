@@ -110,6 +110,14 @@ void VideoTransmitter::SetErrorCallback(VideoErrorCallback callback) {
     error_callback_ = callback;
 }
 
+void VideoTransmitter::SetLogFile(const std::string& path) {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+    log_file_.open(path, std::ios::app);
+}
+
 bool VideoTransmitter::IsVideoOpen() const {
     return video_opened_;
 }
@@ -243,8 +251,28 @@ bool VideoTransmitter::SendFrame(const VideoCodec::EncodedFrame& frame) {
     // Source Block ID（从1开始，0保留给配置）
     uint32_t block_id = block_id_counter_++;
     
+    // I 帧特殊保护：在当前自适应冗余度基础上再加 30%
+    if (frame_type == FrameType::I_FRAME) {
+        float current_ratio = unified_sender_->getCurrentRedundancy(DataPriority::VIDEO);
+        float i_frame_ratio = std::min(0.80f, current_ratio + 0.30f);
+        unified_sender_->setNextRepairRatio(DataPriority::VIDEO, block_id, i_frame_ratio);
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        if (log_file_.is_open()) {
+            log_file_ << "[I帧保护] stream=" << block_id << " 冗余度=" << (i_frame_ratio * 100) << "%" << std::endl;
+        }
+    }
+    
     // 使用 UnifiedSender 发送（内部会自动进行 RaptorQ 编码和调度）
     unified_sender_->send(DataPriority::VIDEO, block_id, frame_data);
+    
+    // 记录发送日志（用于计算传输延迟）
+    {
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        if (log_file_.is_open()) {
+            log_file_ << DataTransmit::GetCurrentTimestampUs() << "," << frame_seq << ","
+                      << (int)frame_type << "," << frame_data.size() << std::endl;
+        }
+    }
     
     // 更新统计（符号数估算）
     auto params = GetTransmitParams(frame_type);

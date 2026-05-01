@@ -16,7 +16,8 @@ pkill -f "raptorq_demo" 2>/dev/null
 sleep 1
 
 rm -f /tmp/video_live.h264
-rm -f /tmp/receiver.log /tmp/sender.log
+mkdir -p logs/liveview
+rm -f logs/liveview/receiver.log logs/liveview/sender.log logs/liveview/http_server.log
 
 echo "========================================"
 echo "  实时视频流 - 浏览器观看模式"
@@ -28,14 +29,14 @@ echo ""
 
 # 1. 启动接收端
 echo "[1/4] 启动接收端 (端口 9001)..."
-nohup ./build/raptorq_demo receiver > /tmp/receiver.log 2>&1 &
+nohup ./build/raptorq_demo receiver > logs/liveview/receiver.log 2>&1 &
 RECV_PID=$!
 disown
 sleep 2
 
 # 2. 启动 HTTP 服务器
 echo "[2/4] 启动 HTTP MJPEG 流媒体服务器 (端口 $HTTP_PORT)..."
-nohup python3 live_http_server.py > /tmp/http_server.log 2>&1 &
+nohup python3 live_http_server.py > logs/liveview/http_server.log 2>&1 &
 HTTP_PID=$!
 disown
 sleep 2
@@ -50,7 +51,7 @@ fi
 
 # 4. 启动发送端
 echo "[4/4] 启动发送端 (发送至 $SENDER_IP:9001)..."
-nohup ./build/raptorq_demo sender $SENDER_IP video > /tmp/sender.log 2>&1 &
+nohup ./build/raptorq_demo sender $SENDER_IP video > logs/liveview/sender.log 2>&1 &
 SEND_PID=$!
 disown
 

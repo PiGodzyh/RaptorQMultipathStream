@@ -22,6 +22,9 @@ FCControlTransmitter::FCControlTransmitter(std::shared_ptr<UnifiedSender> unifie
 
 FCControlTransmitter::~FCControlTransmitter() {
     Stop();
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
 }
 
 void FCControlTransmitter::Run() {
@@ -75,6 +78,14 @@ void FCControlTransmitter::Stop() {
     running_ = false;
 }
 
+void FCControlTransmitter::SetLogFile(const std::string& log_path) {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+    log_file_.open(log_path, std::ios::out | std::ios::app);
+}
+
 bool FCControlTransmitter::SendCommand(const std::string& command, uint8_t priority) {
     std::lock_guard<std::mutex> lock(send_mutex_);
     
@@ -82,13 +93,24 @@ bool FCControlTransmitter::SendCommand(const std::string& command, uint8_t prior
     packet.command = command;
     
     uint32_t seq = seq_counter_++;
-    return SendFrame(packet, seq);
+    uint64_t ts = GetCurrentTimestampUs();
+    bool ok = SendFrame(packet, seq, ts);
+    
+    // 写入发送日志（使用与 header 相同的时间戳）
+    {
+        std::lock_guard<std::mutex> log_lock(log_mutex_);
+        if (log_file_.is_open()) {
+            log_file_ << ts << "," << seq << "," << (int)priority << "," << command << std::endl;
+        }
+    }
+    
+    return ok;
 }
 
-bool FCControlTransmitter::SendFrame(const FCControlPacket& packet, uint32_t seq) {
+bool FCControlTransmitter::SendFrame(const FCControlPacket& packet, uint32_t seq, uint64_t timestamp) {
     // 构建数据包
     FCControlHeader header;
-    header.timestamp = GetCurrentTimestampUs();
+    header.timestamp = timestamp;
     header.seq = seq;
     header.cmd_len = packet.command.length();
     header.priority = FCControlHeader::PRIORITY_NORMAL;
@@ -213,10 +235,10 @@ void FCControlReceiver::OnFrameReceived(DataPriority priority, uint32_t stream_i
               << "][延迟" << std::fixed << std::setprecision(2) << delay_ms << "ms] " 
               << command << std::endl;
     
-    // 写入日志
+    // 写入日志（第一列为接收时刻的时间戳，方便与发送端对比计算延迟）
     std::lock_guard<std::mutex> lock(log_mutex_);
     if (log_file_.is_open()) {
-        log_file_ << header.timestamp << "," << header.seq << ","
+        log_file_ << now << "," << header.seq << ","
                   << (int)header.priority << "," << delay_ms << ","
                   << command << std::endl;
     }

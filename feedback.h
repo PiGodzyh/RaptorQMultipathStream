@@ -59,6 +59,15 @@ struct FeedbackPacket {
         , rtt_ms(0)
         , suggested_redundancy(0.1f)
         , suggested_rate_kbps(0) {}
+    
+    // 序列化到字节数组
+    std::vector<uint8_t> serialize() const;
+    
+    // 反序列化
+    static bool deserialize(const uint8_t* data, size_t len, FeedbackPacket& packet);
+    
+    // 序列化后的大小
+    static constexpr size_t kSerializedSize = 49;  // 手动计算
 };
 
 /**
@@ -72,6 +81,10 @@ struct StreamStats {
     std::atomic<uint32_t> received_symbols{0};
     std::atomic<uint32_t> expected_symbols{0};
     
+    // 阶段性统计快照（用于计算阶段性丢包率）
+    uint32_t snapshot_received_ = 0;
+    uint32_t snapshot_expected_ = 0;
+    
     // 时间统计
     std::chrono::steady_clock::time_point first_receive_time;
     std::chrono::steady_clock::time_point last_receive_time;
@@ -80,8 +93,14 @@ struct StreamStats {
     std::vector<uint32_t> delay_samples;  // 最近N个延迟样本
     mutable std::mutex delay_mutex;
     
-    // 计算丢包率
+    // 计算累计丢包率
     float getLossRate() const;
+    
+    // 计算阶段性丢包率（从上次 resetSnapshot 开始）
+    float getPhaseLossRate() const;
+    
+    // 重置阶段性统计快照
+    void resetSnapshot();
     
     // 计算平均延迟
     uint32_t getAvgDelayMs() const;
@@ -104,22 +123,21 @@ public:
         float increase_step;    // 每次增加 5%
         float decrease_step;    // 每次减少 2%
         
-        // 阈值
-        float high_loss_threshold;   // 高丢包阈值 20%
-        float medium_loss_threshold; // 中丢包阈值 10%
-        float low_loss_threshold;    // 低丢包阈值 5%
+        // 目标成功率（核心参数）
+        float target_success_rate;     // 目标成功率 90%
+        float success_tolerance;       // 容忍区间 ±5%
         
+        // 阈值（保留用于 RTT 判断）
         uint32_t high_rtt_threshold_ms;  // 高延迟阈值
         uint32_t low_rtt_threshold_ms;   // 低延迟阈值
         
         Config()
-            : min_redundancy(0.05f)
+            : min_redundancy(0.40f)
             , max_redundancy(0.80f)
-            , increase_step(0.05f)
-            , decrease_step(0.02f)
-            , high_loss_threshold(0.20f)
-            , medium_loss_threshold(0.10f)
-            , low_loss_threshold(0.05f)
+            , increase_step(0.03f)      // 每次增加 3%，更平缓
+            , decrease_step(0.05f)      // 每次降低 5%，更积极
+            , target_success_rate(0.90f)
+            , success_tolerance(0.10f)  // 容忍区间 ±10%，舒适区 80%~100%
             , high_rtt_threshold_ms(200)
             , low_rtt_threshold_ms(50) {}
     };
@@ -207,6 +225,11 @@ public:
      * 打印统计
      */
     void printStatistics() const;
+    
+    /**
+     * 设置初始冗余度（与实际 Sender 同步）
+     */
+    void setInitialRedundancy(DataPriority priority, float redundancy);
 
 private:
     /**
@@ -226,6 +249,9 @@ private:
     std::map<DataPriority, float> current_redundancy_;
     std::map<DataPriority, uint32_t> current_rate_kbps_;
     mutable std::mutex config_mutex_;
+    
+    // 平滑后的丢包率（EWMA，减少随机波动）
+    std::map<DataPriority, float> smoothed_loss_rate_;
     
     // 反馈队列
     std::vector<FeedbackPacket> feedback_queue_;
@@ -256,7 +282,7 @@ public:
         uint32_t max_delay_samples;       // 最大延迟样本数
         
         Config()
-            : feedback_interval_ms(100)
+            : feedback_interval_ms(500)   // 500ms 反馈周期，样本更稳定
             , report_interval_packets(10)
             , max_delay_samples(100) {}
     };

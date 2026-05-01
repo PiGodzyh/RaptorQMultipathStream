@@ -10,18 +10,19 @@ echo ""
 echo "=== 2. 清理旧进程和旧文件 ==="
 ps aux | grep "[r]aptorq_demo" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
 sleep 1
+mkdir -p logs/normal
 rm -f output/videos/received.mp4
 
 echo ""
 echo "=== 3. 启动接收端 ==="
-./build/raptorq_demo receiver > /tmp/receiver.log 2>&1 &
+./build/raptorq_demo receiver > logs/normal/receiver.log 2>&1 &
 RECV_PID=$!
 echo "Receiver PID: $RECV_PID"
 sleep 2
 
 echo ""
 echo "=== 4. 启动发送端 ==="
-./build/raptorq_demo sender 127.0.0.1 all > /tmp/sender.log 2>&1 &
+./build/raptorq_demo sender 127.0.0.1 all > logs/normal/sender.log 2>&1 &
 SEND_PID=$!
 echo "Sender PID: $SEND_PID"
 

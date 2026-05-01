@@ -84,6 +84,26 @@ public:
     void setRateLimit(DataPriority priority, uint32_t kbps);
     
     /**
+     * 设置是否 Bypass RaptorQ FEC 编码
+     */
+    void setBypassFec(bool enable);
+    
+    /**
+     * 设置发送丢包率（模拟网络丢包）
+     */
+    void setDropRate(float rate);
+    
+    /**
+     * 获取当前 FEC 冗余度（用于 I 帧特殊保护）
+     */
+    float getCurrentRedundancy(DataPriority priority) const;
+    
+    /**
+     * 设置指定流的临时冗余度（I 帧特殊保护）
+     */
+    void setNextRepairRatio(DataPriority priority, uint64_t stream_id, float ratio);
+    
+    /**
      * 接收反馈包（网络层调用）
      */
     void onFeedbackReceived(const FeedbackPacket& feedback);
@@ -92,6 +112,11 @@ public:
      * 获取统计信息
      */
     void printStatistics() const;
+    
+    /**
+     * 设置所有 Sender 的日志文件路径
+     */
+    void SetLogFile(const std::string& path);
     
     /**
      * 检查是否正在运行
@@ -130,6 +155,12 @@ private:
     std::thread block_process_thread_;
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> seq_counter_{0};
+    
+    // Bypass 模式
+    bool bypass_fec_ = false;
+
+    // 手动冗余度标志（防止 FeedbackController 覆盖手动设置）
+    bool manual_redundancy_[5] = {false, false, false, false, false};
     
     // 统计
     std::atomic<uint64_t> total_frames_in_{0};

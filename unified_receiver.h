@@ -143,6 +143,11 @@ public:
     bool start();
     void stop();
     
+    /**
+     * 设置是否 Bypass RaptorQ FEC 解码
+     */
+    void setBypassFec(bool enable);
+    
     // 获取统计信息
     struct Statistics {
         uint64_t total_packets_received = 0;
@@ -194,6 +199,9 @@ private:
     int next_callback_id_ = 0;
     DecodeCallback legacy_decode_callback_;  // 兼容旧接口
     ErrorCallback error_callback_;
+    
+    // Bypass 模式
+    bool bypass_fec_ = false;
     
     // 统计
     mutable std::mutex stats_mutex_;

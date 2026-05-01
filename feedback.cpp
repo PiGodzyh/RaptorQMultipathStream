@@ -3,6 +3,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 // ========== StreamStats 实现 ==========
 
@@ -14,6 +15,32 @@ float StreamStats::getLossRate() const {
     
     uint32_t lost = (expected > received) ? (expected - received) : 0;
     return static_cast<float>(lost) / expected;
+}
+
+void StreamStats::resetSnapshot() {
+    snapshot_received_ = received_symbols.load();
+    snapshot_expected_ = expected_symbols.load();
+}
+
+float StreamStats::getPhaseLossRate() const {
+    uint32_t expected = expected_symbols.load();
+    uint32_t received = received_symbols.load();
+    
+    if (expected == 0) return 0.0f;
+    
+    uint32_t phase_expected = expected - snapshot_expected_;
+    uint32_t phase_received = received - snapshot_received_;
+    
+    // 如果阶段性样本太少，回退到累计统计
+    if (phase_expected < 10) {
+        uint32_t lost = (expected > received) ? (expected - received) : 0;
+        return static_cast<float>(lost) / expected;
+    }
+    
+    uint32_t phase_lost = (phase_expected > phase_received) 
+                          ? (phase_expected - phase_received) 
+                          : 0;
+    return static_cast<float>(phase_lost) / phase_expected;
 }
 
 uint32_t StreamStats::getAvgDelayMs() const {
@@ -75,32 +102,43 @@ AdaptiveFEC::AdaptiveFEC(const Config& config) : config_(config) {}
 float AdaptiveFEC::calculateRedundancy(float current_redundancy, 
                                        const FeedbackPacket& feedback) {
     float loss_rate = feedback.loss_rate;
+    float success_rate = 1.0f - loss_rate;
     float new_redundancy = current_redundancy;
     
-    // 基于丢包率调整
-    if (loss_rate > config_.high_loss_threshold) {
-        // 高丢包，大幅增加冗余
-        new_redundancy += config_.increase_step * 2;
-    } else if (loss_rate > config_.medium_loss_threshold) {
-        // 中等丢包，适度增加冗余
-        new_redundancy += config_.increase_step;
-    } else if (loss_rate < config_.low_loss_threshold) {
-        // 低丢包，可以降低冗余
+    // 计算与目标成功率的偏差
+    float deviation = success_rate - config_.target_success_rate;
+    float tolerance = config_.success_tolerance;
+    
+    if (deviation < -tolerance) {
+        // 成功率低于目标区间下限（< 80%），需要增加冗余
+        float severity = std::min(1.0f, std::abs(deviation) / tolerance);
+        new_redundancy += config_.increase_step * (1.0f + severity);
+    } else if (deviation < 0.0f) {
+        // 成功率在目标区间内但偏低（80%~90%），适度增加
+        new_redundancy += config_.increase_step * 0.5f;
+    } else if (deviation > tolerance * 0.5f) {
+        // 成功率高于目标区间中上（> 95%），可以降低冗余
         new_redundancy -= config_.decrease_step;
     }
+    // 否则：成功率在舒适区（90%~95%），维持当前冗余度
     
-    // 基于延迟调整（延迟高可能意味着拥塞）
+    // 基于延迟的微调（延迟高增加冗余，延迟低且成功率足够则降低）
     if (feedback.avg_delay_ms > config_.high_rtt_threshold_ms) {
-        // 延迟高，增加冗余以应对潜在丢包
-        new_redundancy += config_.increase_step;
+        new_redundancy += config_.increase_step * 0.5f;
     } else if (feedback.avg_delay_ms < config_.low_rtt_threshold_ms && 
-               loss_rate < config_.low_loss_threshold) {
-        // 延迟低且丢包少，可以降低冗余
+               deviation > tolerance * 0.5f) {
         new_redundancy -= config_.decrease_step * 0.5f;
     }
     
-    // 限制在有效范围内
-    new_redundancy = std::max(config_.min_redundancy, 
+    // 动态下限：根据当前丢包率计算最低可行冗余度
+    // 公式：repair_ratio >= loss_rate / (1 - loss_rate)
+    // 保证在丢包率 X% 的网络中，冗余度不会低到无法解码
+    float dynamic_min = loss_rate / (1.0f - loss_rate);
+    dynamic_min = std::max(config_.min_redundancy, dynamic_min);
+    dynamic_min = std::min(config_.max_redundancy, dynamic_min);
+    
+    // 限制在有效范围内（动态下限优先于固定下限）
+    new_redundancy = std::max(dynamic_min, 
                               std::min(config_.max_redundancy, new_redundancy));
     
     // 记录历史
@@ -115,23 +153,29 @@ float AdaptiveFEC::calculateRedundancy(float current_redundancy,
 
 uint32_t AdaptiveFEC::calculateRate(uint32_t current_rate_kbps,
                                     const FeedbackPacket& feedback) {
+    constexpr uint32_t kMinRateKbps = 100;  // 速率下限 100kbps
+    
     // 如果拥塞，降低速率
     if (isCongested(feedback)) {
-        return static_cast<uint32_t>(current_rate_kbps * 0.8f);  // 降低 20%
+        uint32_t new_rate = static_cast<uint32_t>(current_rate_kbps * 0.8f);
+        return std::max(kMinRateKbps, new_rate);
     }
     
-    // 如果网络状况良好，可以逐步恢复速率
-    if (feedback.loss_rate < config_.low_loss_threshold &&
+    // 如果网络状况良好（成功率高于目标上限），可以逐步恢复速率
+    float success_rate = 1.0f - feedback.loss_rate;
+    if (success_rate > config_.target_success_rate + config_.success_tolerance &&
         feedback.avg_delay_ms < config_.low_rtt_threshold_ms) {
-        return static_cast<uint32_t>(current_rate_kbps * 1.05f);  // 增加 5%
+        uint32_t new_rate = static_cast<uint32_t>(current_rate_kbps * 1.05f);
+        return new_rate;
     }
     
     return current_rate_kbps;
 }
 
 bool AdaptiveFEC::isCongested(const FeedbackPacket& feedback) const {
-    // 拥塞判断：高丢包或高延迟
-    return (feedback.loss_rate > config_.high_loss_threshold) ||
+    // 拥塞判断：成功率远低于目标，或高延迟
+    float success_rate = 1.0f - feedback.loss_rate;
+    return (success_rate < config_.target_success_rate - config_.success_tolerance) ||
            (feedback.avg_delay_ms > config_.high_rtt_threshold_ms);
 }
 
@@ -186,26 +230,49 @@ void FeedbackController::processLoop() {
         feedback_queue_.clear();
         lock.unlock();
         
-        // 处理反馈
+        // 按优先级聚合反馈，每个优先级只调整一次冗余度
+        std::map<DataPriority, std::pair<uint32_t, uint32_t>> agg_stats;  // priority -> (received, total)
+        std::map<DataPriority, FeedbackPacket> agg_feedback;
         for (const auto& feedback : batch) {
             auto priority = feedback.priority;
+            agg_stats[priority].first += feedback.received_symbols;
+            agg_stats[priority].second += feedback.total_symbols;
+            // 保留最后一个 feedback 的其他字段（延迟等）
+            agg_feedback[priority] = feedback;
+            feedback_received_++;
+        }
+        
+        // 对每个优先级应用一次调整
+        for (auto& pair : agg_stats) {
+            auto priority = pair.first;
+            uint32_t total_received = pair.second.first;
+            uint32_t total_symbols = pair.second.second;
+            
+            if (total_symbols == 0) continue;
+            
+            // 构建聚合反馈包
+            FeedbackPacket aggregated = agg_feedback[priority];
+            aggregated.received_symbols = total_received;
+            aggregated.total_symbols = total_symbols;
+            aggregated.lost_symbols = (total_symbols > total_received) 
+                                      ? (total_symbols - total_received) 
+                                      : 0;
+            aggregated.loss_rate = static_cast<float>(aggregated.lost_symbols) / total_symbols;
             
             float current_redundancy = getCurrentRedundancy(priority);
             uint32_t current_rate = getCurrentRate(priority);
             
             // 计算新的配置
             float new_redundancy = adaptive_fec_.calculateRedundancy(
-                current_redundancy, feedback);
+                current_redundancy, aggregated);
             uint32_t new_rate = adaptive_fec_.calculateRate(
-                current_rate, feedback);
+                current_rate, aggregated);
             
             // 应用调整
             if (new_redundancy != current_redundancy || new_rate != current_rate) {
                 applyAdjustment(priority, new_redundancy, new_rate);
                 adjustments_applied_++;
             }
-            
-            feedback_received_++;
         }
     }
 }
@@ -263,6 +330,13 @@ uint32_t FeedbackController::getCurrentRate(DataPriority priority) const {
         return it->second;
     }
     return 1000;  // 默认值
+}
+
+void FeedbackController::setInitialRedundancy(DataPriority priority, float redundancy) {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    current_redundancy_[priority] = redundancy;
+    std::cout << "[FeedbackController] Initial redundancy synced for priority "
+              << static_cast<int>(priority) << ": " << (redundancy * 100) << "%" << std::endl;
 }
 
 void FeedbackController::printStatistics() const {
@@ -324,6 +398,9 @@ void FeedbackSender::sendLoop() {
                 send_callback_(packet);
                 feedback_sent_++;
             }
+            
+            // 发送反馈后重置阶段性统计快照
+            pair.second->resetSnapshot();
         }
     }
 }
@@ -342,7 +419,7 @@ FeedbackPacket FeedbackSender::buildFeedbackPacket(uint64_t stream_id) {
         packet.lost_symbols = (packet.total_symbols > packet.received_symbols) 
                               ? (packet.total_symbols - packet.received_symbols) 
                               : 0;
-        packet.loss_rate = stats->getLossRate();
+        packet.loss_rate = stats->getPhaseLossRate();
         packet.avg_delay_ms = stats->getAvgDelayMs();
         packet.jitter_ms = stats->getJitterMs();
         
@@ -429,4 +506,103 @@ FeedbackSender::Statistics FeedbackSender::getStatistics() const {
     stats.symbols_reported = symbols_reported_.load();
     stats.losses_reported = losses_reported_.load();
     return stats;
+}
+
+// ========== FeedbackPacket 序列化 ==========
+
+std::vector<uint8_t> FeedbackPacket::serialize() const {
+    std::vector<uint8_t> data(kSerializedSize);
+    size_t offset = 0;
+    
+    auto write_u64 = [&](uint64_t val) {
+        data[offset++] = (val >> 56) & 0xFF;
+        data[offset++] = (val >> 48) & 0xFF;
+        data[offset++] = (val >> 40) & 0xFF;
+        data[offset++] = (val >> 32) & 0xFF;
+        data[offset++] = (val >> 24) & 0xFF;
+        data[offset++] = (val >> 16) & 0xFF;
+        data[offset++] = (val >> 8) & 0xFF;
+        data[offset++] = val & 0xFF;
+    };
+    auto write_u32 = [&](uint32_t val) {
+        data[offset++] = (val >> 24) & 0xFF;
+        data[offset++] = (val >> 16) & 0xFF;
+        data[offset++] = (val >> 8) & 0xFF;
+        data[offset++] = val & 0xFF;
+    };
+    auto write_u8 = [&](uint8_t val) {
+        data[offset++] = val;
+    };
+    auto write_float = [&](float val) {
+        static_assert(sizeof(float) == 4, "float must be 4 bytes");
+        uint32_t bits;
+        std::memcpy(&bits, &val, sizeof(float));
+        write_u32(bits);
+    };
+    
+    write_u64(timestamp_ms);
+    write_u8(static_cast<uint8_t>(priority));
+    write_u32(stream_id);
+    write_u32(received_symbols);
+    write_u32(lost_symbols);
+    write_u32(total_symbols);
+    write_float(loss_rate);
+    write_u32(avg_delay_ms);
+    write_u32(jitter_ms);
+    write_u32(rtt_ms);
+    write_float(suggested_redundancy);
+    write_u32(suggested_rate_kbps);
+    
+    return data;
+}
+
+bool FeedbackPacket::deserialize(const uint8_t* data, size_t len, FeedbackPacket& packet) {
+    if (len != kSerializedSize) return false;
+    
+    size_t offset = 0;
+    
+    auto read_u64 = [&]() -> uint64_t {
+        uint64_t val = 0;
+        val |= static_cast<uint64_t>(data[offset++]) << 56;
+        val |= static_cast<uint64_t>(data[offset++]) << 48;
+        val |= static_cast<uint64_t>(data[offset++]) << 40;
+        val |= static_cast<uint64_t>(data[offset++]) << 32;
+        val |= static_cast<uint64_t>(data[offset++]) << 24;
+        val |= static_cast<uint64_t>(data[offset++]) << 16;
+        val |= static_cast<uint64_t>(data[offset++]) << 8;
+        val |= static_cast<uint64_t>(data[offset++]);
+        return val;
+    };
+    auto read_u32 = [&]() -> uint32_t {
+        uint32_t val = 0;
+        val |= static_cast<uint32_t>(data[offset++]) << 24;
+        val |= static_cast<uint32_t>(data[offset++]) << 16;
+        val |= static_cast<uint32_t>(data[offset++]) << 8;
+        val |= static_cast<uint32_t>(data[offset++]);
+        return val;
+    };
+    auto read_u8 = [&]() -> uint8_t {
+        return data[offset++];
+    };
+    auto read_float = [&]() -> float {
+        uint32_t bits = read_u32();
+        float val;
+        std::memcpy(&val, &bits, sizeof(float));
+        return val;
+    };
+    
+    packet.timestamp_ms = read_u64();
+    packet.priority = static_cast<DataPriority>(read_u8());
+    packet.stream_id = read_u32();
+    packet.received_symbols = read_u32();
+    packet.lost_symbols = read_u32();
+    packet.total_symbols = read_u32();
+    packet.loss_rate = read_float();
+    packet.avg_delay_ms = read_u32();
+    packet.jitter_ms = read_u32();
+    packet.rtt_ms = read_u32();
+    packet.suggested_redundancy = read_float();
+    packet.suggested_rate_kbps = read_u32();
+    
+    return true;
 }

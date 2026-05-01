@@ -42,7 +42,7 @@ VideoWriter::VideoWriter(VideoWriter&& other) noexcept
     : is_open_(other.is_open_)
     , last_error_(other.last_error_)
     , video_params_(other.video_params_)
-    , frame_count_(other.frame_count_)
+    , frame_count_(other.frame_count_.load())
     , fmt_ctx_(other.fmt_ctx_)
     , video_stream_(other.video_stream_)
     , packet_(other.packet_)
@@ -67,7 +67,7 @@ VideoWriter& VideoWriter::operator=(VideoWriter&& other) noexcept {
         is_open_ = other.is_open_;
         last_error_ = other.last_error_;
         video_params_ = other.video_params_;
-        frame_count_ = other.frame_count_;
+        frame_count_ = other.frame_count_.load();
         fmt_ctx_ = other.fmt_ctx_;
         video_stream_ = other.video_stream_;
         packet_ = other.packet_;
@@ -93,7 +93,7 @@ VideoWriter& VideoWriter::operator=(VideoWriter&& other) noexcept {
 static void FrameTraceLog(const std::string& msg) {
     static std::mutex trace_mutex;
     std::lock_guard<std::mutex> lock(trace_mutex);
-    std::ofstream ofs("frame_trace.log", std::ios::app);
+    std::ofstream ofs("logs/debug/frame_trace.log", std::ios::app);
     if (ofs) {
         auto now = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -283,17 +283,17 @@ bool VideoWriter::WritePacket(const uint8_t* data, size_t size,
     // 复制数据（从MP4读取的已经是AVCC格式，直接写入）
     memcpy(packet_->data, data, size);
 
-    // 转换毫秒到流的time_base
-    int64_t pts = av_rescale_q(pts_ms, {1, 1000}, video_stream_->time_base);
-
-    // 使用单调递增的DTS（MP4 muxer要求DTS单调递增）
-    int64_t dts = frame_count_;
+    // 使用单调递增的 pts/dts（不依赖传入的 pts_ms，避免单位混淆）
+    AVRational stream_tb = video_stream_->time_base;
+    int64_t duration = av_rescale_q(video_params_.fps_den, {1, video_params_.fps_num}, stream_tb);
+    int64_t dts = frame_count_.fetch_add(1, std::memory_order_relaxed) * duration;
+    int64_t pts = dts;
 
     // 设置packet属性
     packet_->pts = pts;
     packet_->dts = dts;
     packet_->stream_index = video_stream_->index;
-    packet_->duration = av_rescale_q(1000 / video_params_.fps_num, {1, 1000}, video_stream_->time_base);
+    packet_->duration = duration;
 
     if (is_key_frame) {
         packet_->flags |= AV_PKT_FLAG_KEY;
@@ -301,12 +301,13 @@ bool VideoWriter::WritePacket(const uint8_t* data, size_t size,
         packet_->flags = 0;
     }
 
-    FrameTraceLog("[WRITER] frame_count=" + std::to_string(frame_count_) +
+    FrameTraceLog("[WRITER] frame_count=" + std::to_string(dts) +
                   " pts=" + std::to_string(pts) +
                   " dts=" + std::to_string(dts) +
                   " key=" + std::to_string(is_key_frame) +
                   " size=" + std::to_string(size));
-    // 写入packet
+    // 写入packet（av_interleaved_write_frame 非线程安全，需加锁）
+    std::lock_guard<std::mutex> lock(write_mutex_);
     ret = av_interleaved_write_frame(fmt_ctx_, packet_);
     if (ret < 0) {
         char errbuf[256];
@@ -316,8 +317,6 @@ bool VideoWriter::WritePacket(const uint8_t* data, size_t size,
         av_packet_unref(packet_);
         return false;
     }
-
-    frame_count_++;
 
     return true;
 }

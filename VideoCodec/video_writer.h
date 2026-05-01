@@ -26,6 +26,8 @@
 
 #include "video_codec.h"
 #include <functional>
+#include <atomic>
+#include <mutex>
 
 // FFmpeg前向声明
 struct AVFormatContext;
@@ -90,7 +92,7 @@ public:
     /**
      * 获取已写入帧数
      */
-    int64_t GetFrameCount() const { return frame_count_; }
+    int64_t GetFrameCount() const { return frame_count_.load(); }
 
     /**
      * 刷新写入器，确保所有数据写入文件
@@ -111,7 +113,10 @@ private:
     bool is_open_;
     ErrorCode last_error_;
     VideoParams video_params_;
-    int64_t frame_count_;
+    std::atomic<int64_t> frame_count_;
+    
+    // 线程安全锁（av_interleaved_write_frame 非线程安全）
+    mutable std::mutex write_mutex_;
     
     // FFmpeg上下文
     AVFormatContext* fmt_ctx_;

@@ -6,11 +6,14 @@
 #include <atomic>
 #include <string>
 #include <chrono>
+#include <fstream>
+#include <mutex>
 
 #include "network/network_client.h"
 #include "event_base/event_queue.h"
 #include "event_base/event_loop.h"
 #include "pack/rq_pack.h"
+#include "feedback.h"
 
 /**
  * Sender 类
@@ -74,6 +77,26 @@ class Sender {
    * @param ratio 修复符号占源符号的比例（0.0 - 1.0），默认 0.1 (10%)
    */
   void setRepairRatio(float ratio);
+  float getRepairRatio() const;
+  
+  /**
+   * 设置指定流的修复符号比例（临时覆盖，编码该流时使用）
+   * @param stream_id 流ID
+   * @param ratio 修复符号比例
+   */
+  void setNextRepairRatio(uint64_t stream_id, float ratio);
+  
+  /**
+   * 设置是否 Bypass RaptorQ FEC 编码（直接发送原始数据）
+   * @param enable true 为 bypass 模式，false 为正常 RaptorQ 编码模式
+   */
+  void setBypassFec(bool enable);
+  
+  /**
+   * 设置发送丢包率（模拟网络丢包，0.0-1.0）
+   * @param rate 丢包率
+   */
+  void setDropRate(float rate);
   
   /**
    * 设置发送间隔（微秒）
@@ -83,10 +106,21 @@ class Sender {
   void setSendInterval(uint32_t interval_us);
   
   /**
+   * 设置反馈回调（接收端发送的反馈包）
+   */
+  using FeedbackCallback = std::function<void(const FeedbackPacket&)>;
+  void setFeedbackCallback(FeedbackCallback callback);
+  
+  /**
    * 设置编码队列大小
    * @param size 队列大小
    */
   void setQueueSize(size_t size);
+  
+  /**
+   * 设置日志文件路径
+   */
+  void SetLogFile(const std::string& path);
   
   /**
    * 获取当前发送速率（pkt/s）
@@ -179,10 +213,18 @@ class Sender {
   // 新增可配置参数
   uint32_t send_interval_us_;                // 发送间隔（微秒）
   size_t queue_size_;                        // 队列大小
+  bool bypass_fec_;                          // 是否绕过 RaptorQ 编码
+  float drop_rate_;                          // 发送丢包率（模拟网络丢包）
+  FeedbackCallback feedback_callback_;       // 反馈回调
+  std::map<uint64_t, float> next_repair_ratios_;  // 指定流的临时冗余度
+  mutable std::mutex next_repair_mutex_;
   
   // 发送速率统计
   mutable std::mutex stat_mutex_;
   mutable std::vector<std::chrono::steady_clock::time_point> send_times_;
   std::chrono::steady_clock::time_point last_send_time_;
   mutable std::mutex send_time_mutex_;
+  
+  std::ofstream log_file_;
+  std::mutex log_mutex_;
 };

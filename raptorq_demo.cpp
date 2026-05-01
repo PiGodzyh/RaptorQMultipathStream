@@ -140,6 +140,7 @@ void SendGridMapDataSim(UnifiedSender* sender, int duration_sec) {
 
 void RunVideoSenderReal(std::shared_ptr<UnifiedSender> sender) {
     VideoTransmit::VideoTransmitter transmitter(sender);
+    transmitter.SetLogFile("logs/video_tx.log");
     if (!transmitter.OpenVideoFile("data/videos/test_gop1s.mp4")) {
         std::cerr << "[Video] Failed to open video file" << std::endl;
         return;
@@ -180,18 +181,16 @@ void RunGridMapSenderReal(std::shared_ptr<UnifiedSender> sender) {
 
 void RunFCSenderReal(std::shared_ptr<UnifiedSender> sender) {
     FCControlTransmitter transmitter(sender);
-    // 非交互模式：自动发送若干条指令后退出
-    for (int i = 0; i < 20 && g_running; ++i) {
-        std::string cmd = "AUTO_CMD_" + std::to_string(i);
-        auto data = std::make_shared<std::string>(cmd);
-        sender->send(DataPriority::FC_COMMAND, i, data);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
+    transmitter.SetLogFile("logs/fc_tx.log");
+    transmitter.Run();  // 交互式输入
 }
 
 int RunSender(const std::vector<DataPriority>& types, 
               const std::string& target_ip,
-              bool use_simulation) {
+              bool use_simulation,
+              bool bypass_fec,
+              float redundancy,
+              float drop_rate) {
     if (types.empty()) {
         std::cerr << "No valid types specified" << std::endl;
         return 1;
@@ -205,6 +204,11 @@ int RunSender(const std::vector<DataPriority>& types,
     for (auto& t : types) std::cout << PriorityToName(t) << " ";
     std::cout << std::endl;
     std::cout << "Mode: " << (use_simulation ? "Simulation" : "Real Data") << std::endl;
+    std::cout << "Bypass FEC: " << (bypass_fec ? "Yes" : "No") << std::endl;
+    std::cout << "Redundancy: " << (redundancy * 100) << "%" << std::endl;
+    if (drop_rate > 0.0f) {
+        std::cout << "Drop Rate: " << (drop_rate * 100) << "% (simulated)" << std::endl;
+    }
     std::cout << "========================================" << std::endl;
     
     UnifiedSenderConfig config;
@@ -215,6 +219,22 @@ int RunSender(const std::vector<DataPriority>& types,
         std::cerr << "Failed to initialize sender" << std::endl;
         return 1;
     }
+    
+    sender->SetLogFile("logs/sender.log");
+    
+    // 设置 Bypass 模式和冗余度
+    if (bypass_fec) {
+        sender->setBypassFec(true);
+    }
+    if (redundancy >= 0.0f) {
+        for (int i = 0; i < 5; ++i) {
+            sender->setRedundancy(static_cast<DataPriority>(i), redundancy);
+        }
+    }
+    if (drop_rate > 0.0f) {
+        sender->setDropRate(drop_rate);
+    }
+    
     sender->start();
     
     std::vector<std::thread> threads;
@@ -269,7 +289,7 @@ int RunSender(const std::vector<DataPriority>& types,
 
 // ==================== 接收端 ====================
 
-int RunReceiver() {
+int RunReceiver(bool bypass_fec) {
     std::cout << "========================================" << std::endl;
     std::cout << "  RaptorQ Multi-Stream Receiver" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -286,8 +306,9 @@ int RunReceiver() {
     // 创建5种专用接收器
     FCControlReceiver fc_receiver(unified_receiver);
     VoiceReceiver voice_receiver(unified_receiver);
-    VideoReceiver video_receiver(unified_receiver);
     PointCloudReceiver pointcloud_receiver(unified_receiver);
+    VideoReceiver video_receiver(unified_receiver);
+    video_receiver.SetLogFile("logs/video_rx.log");
     GridMapReceiver gridmap_receiver(unified_receiver);
     
     // 设置输出
@@ -311,6 +332,12 @@ int RunReceiver() {
     
     gridmap_receiver.Start();
     gridmap_receiver.SetOutputFile(gm_output);
+    
+    // 设置 Bypass 模式
+    if (bypass_fec) {
+        unified_receiver->setBypassFec(true);
+        video_receiver.setBypassMode(true);
+    }
     
     // 启动 UnifiedReceiver（开始接收数据）
     unified_receiver->start();
@@ -427,20 +454,25 @@ void PrintUsage(const char* program) {
     std::cout << "RaptorQ Multi-Stream Demo" << std::endl;
     std::cout << std::endl;
     std::cout << "Usage:" << std::endl;
-    std::cout << "  " << program << " receiver                          # 启动接收端（统一接收5种）" << std::endl;
+    std::cout << "  " << program << " receiver [options]                # 启动接收端（统一接收5种）" << std::endl;
     std::cout << "  " << program << " sender <ip> <types> [options]     # 启动发送端" << std::endl;
     std::cout << std::endl;
     std::cout << "Types (comma separated):" << std::endl;
     std::cout << "  fc, voice, video, pointcloud, gridmap, all" << std::endl;
     std::cout << std::endl;
     std::cout << "Options:" << std::endl;
-    std::cout << "  --simulation     使用模拟数据（默认使用真实文件数据）" << std::endl;
-    std::cout << "  --verbose, -v    启用详细日志输出（DEBUG级别）" << std::endl;
+    std::cout << "  --simulation         使用模拟数据（默认使用真实文件数据）" << std::endl;
+    std::cout << "  --verbose, -v        启用详细日志输出（DEBUG级别）" << std::endl;
+    std::cout << "  --bypass-fec         绕过 RaptorQ FEC，直接发送原始数据" << std::endl;
+    std::cout << "  --redundancy <ratio> 设置 FEC 冗余度（0.0-1.0，默认各类型不同）" << std::endl;
+    std::cout << "  --drop-rate <rate>    模拟网络丢包率（0.0-1.0）" << std::endl;
     std::cout << std::endl;
     std::cout << "Examples:" << std::endl;
-    std::cout << "  " << program << " sender 127.0.0.1 all              # 发送5种真实数据" << std::endl;
-    std::cout << "  " << program << " sender 127.0.0.1 all --simulation # 发送5种模拟数据" << std::endl;
-    std::cout << "  " << program << " sender 192.168.1.100 video,voice  # 只发视频+语音" << std::endl;
+    std::cout << "  " << program << " sender 127.0.0.1 all                    # 发送5种真实数据" << std::endl;
+    std::cout << "  " << program << " sender 127.0.0.1 all --simulation       # 发送5种模拟数据" << std::endl;
+    std::cout << "  " << program << " sender 127.0.0.1 video --bypass-fec     # 直接发送原始视频（无FEC）" << std::endl;
+    std::cout << "  " << program << " sender 127.0.0.1 video --redundancy 0.5 # 50%冗余度" << std::endl;
+    std::cout << "  " << program << " receiver --bypass-fec                   # 接收端配合bypass模式" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -455,11 +487,23 @@ int main(int argc, char* argv[]) {
     std::string mode = argv[1];
     
     if (mode == "receiver") {
-        return RunReceiver();
+        bool bypass_fec = false;
+        for (int i = 2; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--bypass-fec" || arg == "--bypass") {
+                bypass_fec = true;
+            } else if (arg == "--verbose" || arg == "-v") {
+                GetLogConfig().SetGlobalLevel(LogLevel::DEBUG);
+            }
+        }
+        return RunReceiver(bypass_fec);
     } else if (mode == "sender" && argc >= 4) {
         std::string target_ip = argv[2];
         std::string types_str = argv[3];
         bool use_simulation = false;
+        bool bypass_fec = false;
+        float redundancy = -1.0f;  // -1 表示使用默认冗余度
+        float drop_rate = 0.0f;
         
         // 检查可选参数
         for (int i = 4; i < argc; ++i) {
@@ -468,11 +512,25 @@ int main(int argc, char* argv[]) {
                 use_simulation = true;
             } else if (arg == "--verbose" || arg == "-v") {
                 GetLogConfig().SetGlobalLevel(LogLevel::DEBUG);
+            } else if (arg == "--bypass-fec" || arg == "--bypass") {
+                bypass_fec = true;
+            } else if (arg == "--redundancy" && i + 1 < argc) {
+                redundancy = std::stof(argv[++i]);
+                if (redundancy < 0.0f || redundancy > 1.0f) {
+                    std::cerr << "Error: redundancy must be between 0.0 and 1.0" << std::endl;
+                    return 1;
+                }
+            } else if (arg == "--drop-rate" && i + 1 < argc) {
+                drop_rate = std::stof(argv[++i]);
+                if (drop_rate < 0.0f || drop_rate > 1.0f) {
+                    std::cerr << "Error: drop-rate must be between 0.0 and 1.0" << std::endl;
+                    return 1;
+                }
             }
         }
         
         auto types = ParseTypes(types_str);
-        return RunSender(types, target_ip, use_simulation);
+        return RunSender(types, target_ip, use_simulation, bypass_fec, redundancy, drop_rate);
     } else {
         PrintUsage(argv[0]);
         return 1;

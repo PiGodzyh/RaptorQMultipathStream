@@ -3,6 +3,8 @@
 #include <iostream>
 #include <cstring>
 #include <mutex>
+#include <cstdlib>
+#include <random>
 
 Sender::Sender(const std::string& server_addr, uint16_t server_port, 
                uint16_t symbol_size, uint32_t encode_thread_count)
@@ -18,6 +20,8 @@ Sender::Sender(const std::string& server_addr, uint16_t server_port,
     failed_count_(0),
     send_interval_us_(0),  // 默认无发送间隔限制
     queue_size_(kDefaultQueueSize),
+    bypass_fec_(false),
+    drop_rate_(0.0f),
     last_send_time_(std::chrono::steady_clock::now()) {
   // 设置客户端的默认目标地址
   client_.setDefaultTarget(server_addr_, server_port_);
@@ -130,14 +134,49 @@ void Sender::setRepairRatio(float ratio) {
   }
 }
 
+float Sender::getRepairRatio() const {
+  return repair_ratio_;
+}
+
+void Sender::setNextRepairRatio(uint64_t stream_id, float ratio) {
+  if (ratio >= 0.0f && ratio <= 1.0f) {
+    std::lock_guard<std::mutex> lock(next_repair_mutex_);
+    next_repair_ratios_[stream_id] = ratio;
+  }
+}
+
+void Sender::setBypassFec(bool enable) {
+  bypass_fec_ = enable;
+  std::cout << "Sender: Bypass FEC " << (enable ? "启用" : "禁用") << std::endl;
+}
+
+void Sender::setDropRate(float rate) {
+  if (rate >= 0.0f && rate <= 1.0f) {
+    drop_rate_ = rate;
+    std::cout << "Sender: 模拟丢包率设置为 " << (rate * 100.0f) << "%" << std::endl;
+  }
+}
+
 void Sender::setSendInterval(uint32_t interval_us) {
   send_interval_us_ = interval_us;
   std::cout << "Sender: 发送间隔设置为 " << interval_us << " us" << std::endl;
 }
 
+void Sender::setFeedbackCallback(FeedbackCallback callback) {
+  feedback_callback_ = callback;
+}
+
 void Sender::setQueueSize(size_t size) {
   queue_size_ = size;
   std::cout << "Sender: 队列大小设置为 " << size << std::endl;
+}
+
+void Sender::SetLogFile(const std::string& path) {
+  std::lock_guard<std::mutex> lock(log_mutex_);
+  if (log_file_.is_open()) {
+    log_file_.close();
+  }
+  log_file_.open(path, std::ios::app);
 }
 
 double Sender::getCurrentSendRate() const {
@@ -170,6 +209,17 @@ size_t Sender::getQueueSize() const {
 }
 
 void Sender::onReceive(std::shared_ptr<Network::Packet> packet) {
+  // 检查是否是反馈包
+  if (packet->data.size() == FeedbackPacket::kSerializedSize) {
+    FeedbackPacket feedback;
+    if (FeedbackPacket::deserialize(packet->data.data(), packet->data.size(), feedback)) {
+      if (feedback_callback_) {
+        feedback_callback_(feedback);
+      }
+      return;
+    }
+  }
+  
   // 接收到服务器响应
   std::cout << "Sender: 收到响应 " << packet->data.size() << " 字节, 来自 "
             << packet->remote_addr << ":" << packet->remote_port << std::endl;
@@ -220,6 +270,62 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
   uint32_t stream_id = item->stream_id;
   auto& data = item->data;
   
+  // Bypass 模式：直接发送原始数据，不经过 RaptorQ 编码
+  if (bypass_fec_) {
+    BypassPacketHeader header;
+    header.stream_id = stream_id;
+    header.data_length = static_cast<uint32_t>(data->size());
+    
+    std::vector<uint8_t> packet_data(sizeof(BypassPacketHeader) + data->size());
+    std::memcpy(packet_data.data(), &header, sizeof(BypassPacketHeader));
+    std::memcpy(packet_data.data() + sizeof(BypassPacketHeader), 
+                data->data(), data->size());
+    
+    // 发送间隔控制
+    if (send_interval_us_ > 0) {
+      std::lock_guard<std::mutex> lock(send_time_mutex_);
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_send_time_).count();
+      if (elapsed < send_interval_us_) {
+        std::this_thread::sleep_for(std::chrono::microseconds(send_interval_us_ - elapsed));
+      }
+    }
+    
+    // 模拟网络丢包
+    if (false && drop_rate_ > 0.0f && ((float)std::rand() / RAND_MAX) < drop_rate_) {
+      return; // 模拟丢包：不发送
+    }
+    
+    ssize_t sent = client_.send(packet_data);
+    
+    if (sent > 0) {
+      sent_count_++;
+      if (stream_id % 30 == 0) {
+        std::cout << "[Sender Bypass] 发送成功，流 " << stream_id 
+                  << ", 大小: " << packet_data.size() << " 字节" << std::endl;
+      }
+      if (send_interval_us_ > 0) {
+        std::lock_guard<std::mutex> lock(stat_mutex_);
+        send_times_.push_back(std::chrono::steady_clock::now());
+        if (send_times_.size() > 10000) {
+          send_times_.erase(send_times_.begin());
+        }
+      }
+    } else {
+      failed_count_++;
+      std::cerr << "[Sender Bypass] 发送失败，流 " << stream_id 
+                << ", 大小: " << packet_data.size() 
+                << ", 返回值: " << sent << std::endl;
+    }
+    
+    if (send_interval_us_ > 0) {
+      std::lock_guard<std::mutex> lock(send_time_mutex_);
+      last_send_time_ = std::chrono::steady_clock::now();
+    }
+    
+    return;
+  }
+  
   // 1. 创建 RaptorQ 编码器
   RQPack::Encoder encoder(
     reinterpret_cast<const uint8_t*>(data->data()), 
@@ -233,14 +339,42 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
     return;
   }
   
-  // 2. 计算修复符号数量
+  // 2. 计算修复符号数量（支持临时覆盖 + 概率精细化）
   uint32_t source_symbols = encoder.getSourceSymbolCount();
-  uint32_t repair_count = static_cast<uint32_t>(source_symbols * repair_ratio_);
+  float effective_ratio = repair_ratio_;
+  {
+    std::lock_guard<std::mutex> lock(next_repair_mutex_);
+    auto it = next_repair_ratios_.find(stream_id);
+    if (it != next_repair_ratios_.end()) {
+      effective_ratio = it->second;
+      next_repair_ratios_.erase(it);
+    }
+  }
   
-  std::cout << "[编码线程 " << thread_id << "] 流 " << stream_id 
-            << " 编码数据 " << data->size() << " 字节, "
-            << "源符号: " << source_symbols << ", "
-            << "修复符号: " << repair_count << std::endl;
+  // 概率化修复符号数：小数部分 = 额外多发 1 个修复符号的概率
+  // 这样 10 源符号 × 25% = 2.5 → 50% 概率发 3 个，长期期望 2.5 个
+  float exact_repair = source_symbols * effective_ratio;
+  uint32_t base_repair = static_cast<uint32_t>(exact_repair);
+  float fractional = exact_repair - base_repair;
+  
+  uint32_t repair_count = base_repair;
+  if (fractional > 0.0f) {
+    // 线程局部延迟初始化，避免每次调用都构造 std::random_device
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+    if (dist(gen) < fractional) {
+      repair_count++;
+    }
+  }
+  
+  // (日志已关闭以减少终端输出)
+  // std::cout << "[编码线程 " << thread_id << "] 流 " << stream_id 
+  //           << " 编码数据 " << data->size() << " 字节, "
+  //           << "源符号: " << source_symbols << ", "
+  //           << "目标冗余: " << (effective_ratio * 100) << "%, "
+  //           << "精确修复: " << exact_repair << ", "
+  //           << "实际修复: " << repair_count << std::endl;
   
   // 3. 生成所有符号（源符号 + 修复符号）
   std::vector<RQPack::Symbol> symbols;
@@ -256,8 +390,9 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
   uint32_t original_size = data->size();
   uint32_t total_symbols = symbols.size();
   
-  std::cout << "[编码线程 " << thread_id << "] 流 " << stream_id 
-            << " 编码完成，符号数: " << total_symbols << "，开始发送..." << std::endl;
+  // (日志已关闭以减少终端输出)
+  // std::cout << "[编码线程 " << thread_id << "] 流 " << stream_id 
+  //           << " 编码完成，符号数: " << total_symbols << "，开始发送..." << std::endl;
   
   // 5. 直接发送每个符号
   uint32_t sent_count = 0;
@@ -295,6 +430,11 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
       }
     }
     
+    // 模拟网络丢包
+    if (false && drop_rate_ > 0.0f && ((float)std::rand() / RAND_MAX) < drop_rate_) {
+      continue; // 模拟丢包：跳过此符号
+    }
+    
     // 发送
     ssize_t sent = client_.send(packet_data);
     
@@ -326,9 +466,10 @@ void Sender::encodeAndSendPacket(uint32_t thread_id, std::shared_ptr<DataItem>& 
   // 6. 统计
   sent_count_++;
   
-  std::cout << "[编码线程 " << thread_id << "] 流 " << stream_id << " 发送完成, "
-            << "成功: " << sent_count << "/" << total_symbols 
-            << ", 失败: " << failed_count << std::endl;
+  // (日志已关闭以减少终端输出)
+  // std::cout << "[编码线程 " << thread_id << "] 流 " << stream_id << " 发送完成, "
+  //           << "成功: " << sent_count << "/" << total_symbols 
+  //           << ", 失败: " << failed_count << std::endl;
 }
 
 bool Sender::sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& symbols,
@@ -338,9 +479,14 @@ bool Sender::sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& 
     return false;
   }
   
-  std::cout << "[Sender::sendSymbols] stream_id=" << stream_id 
-            << ", symbols=" << symbols.size() 
-            << ", original_size=" << original_size << std::endl;
+  {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (log_file_.is_open()) {
+      log_file_ << "[Sender::sendSymbols] stream_id=" << stream_id 
+                << ", symbols=" << symbols.size() 
+                << ", original_size=" << original_size << std::endl;
+    }
+  }
   
   // 直接使用client_发送（避免进入编码队列再次编码）
   uint32_t total_symbols = symbols.size();
@@ -378,6 +524,11 @@ bool Sender::sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& 
       }
     }
     
+    // 模拟网络丢包
+    if (false && drop_rate_ > 0.0f && ((float)std::rand() / RAND_MAX) < drop_rate_) {
+      continue; // 模拟丢包：跳过此符号
+    }
+    
     // 直接发送
     ssize_t sent = client_.send(packet_data);
     
@@ -385,8 +536,11 @@ bool Sender::sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& 
       sent_count++;
       sent_symbol_count_++;
       if (symbol.id % 10 == 0) {
-        std::cout << "[Sender::sendSymbols] Sent symbol " << symbol.id << "/" << total_symbols 
-                  << " for stream " << stream_id << std::endl;
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        if (log_file_.is_open()) {
+          log_file_ << "[Sender::sendSymbols] Sent symbol " << symbol.id << "/" << total_symbols 
+                    << " for stream " << stream_id << std::endl;
+        }
       }
       // 记录发送时间
       {
@@ -409,8 +563,13 @@ bool Sender::sendSymbols(uint64_t stream_id, const std::vector<RQPack::Symbol>& 
   
   sent_count_++;
   
-  std::cout << "[Sender::sendSymbols] Finished: sent " << sent_count << "/" << total_symbols 
-            << " symbols for stream " << stream_id << std::endl;
+  {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (log_file_.is_open()) {
+      log_file_ << "[Sender::sendSymbols] Finished: sent " << sent_count << "/" << total_symbols 
+                << " symbols for stream " << stream_id << std::endl;
+    }
+  }
   
   return sent_count > 0;
 }
