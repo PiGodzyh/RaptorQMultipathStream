@@ -107,59 +107,64 @@ size_t TransmissionScheduler::scheduleOnce() {
 }
 
 size_t TransmissionScheduler::scheduleStrictPriority() {
-    size_t scheduled = 0;
-    SendTask task;
-    
-    // 先检查总带宽限制
     if (isTotalBandwidthExceeded()) {
-        return scheduled;
+        return 0;
     }
     
-    // 按优先级顺序（FC=0 最高，PointCloud=3 最低）
-    for (int i = 0; i < 5; ++i) {
+    SendTask task;
+    
+    // 第一步：FC 绝对优先
+    if (buffer_->pop(DataPriority::FC_COMMAND, task)) {
+        if (sendTask(task)) {
+            return 1;
+        }
+    }
+    
+    // 第二步：其他四个按固定优先级顺序（Voice > Video > PointCloud > GridMap）
+    for (int i = 1; i < 5; ++i) {
         auto priority = static_cast<DataPriority>(i);
         
         // 检查带宽限制
         uint32_t bandwidth_limit = 0;
         switch (priority) {
-            case DataPriority::FC_COMMAND: bandwidth_limit = config_.fc_bandwidth_kbps; break;
             case DataPriority::VOICE: bandwidth_limit = config_.voice_bandwidth_kbps; break;
             case DataPriority::VIDEO: bandwidth_limit = config_.video_bandwidth_kbps; break;
             case DataPriority::GRID_MAP: bandwidth_limit = config_.grid_map_bandwidth_kbps; break;
             case DataPriority::POINT_CLOUD: bandwidth_limit = config_.point_cloud_bandwidth_kbps; break;
+            default: break;
         }
         
         if (bandwidth_limit > 0 && stats_.current_bandwidth_kbps[i] >= bandwidth_limit) {
             continue;  // 带宽已满
         }
         
-        // 尝试获取并发送任务
-        while (buffer_->pop(task)) {
+        if (buffer_->pop(priority, task)) {
             if (sendTask(task)) {
-                scheduled++;
-                
-                // 只发送一个任务就返回，让低优先级有机会
-                return scheduled;
+                return 1;
             }
         }
     }
     
-    return scheduled;
+    return 0;
 }
 
 size_t TransmissionScheduler::scheduleWeightedRoundRobin() {
-    size_t scheduled = 0;
-    SendTask task;
-    
-    // 先检查总带宽限制
     if (isTotalBandwidthExceeded()) {
-        return scheduled;
+        return 0;
     }
     
-    // 找到下一个有权重且有数据的服务
-    for (int attempts = 0; attempts < 5; ++attempts) {
-        // 选择下一个优先级
-        last_served_ = (last_served_ + 1) % 5;
+    SendTask task;
+    
+    // 第一步：FC 绝对优先
+    if (buffer_->pop(DataPriority::FC_COMMAND, task)) {
+        if (sendTask(task)) {
+            return 1;
+        }
+    }
+    
+    // 第二步：其他四个类型用加权轮询（轮询范围 1~4）
+    for (int attempts = 0; attempts < 4; ++attempts) {
+        last_served_ = (last_served_ % 4) + 1;  // 1,2,3,4 循环（Voice, Video, PointCloud, GridMap）
         auto priority = static_cast<DataPriority>(last_served_);
         int idx = last_served_;
         
@@ -174,11 +179,11 @@ size_t TransmissionScheduler::scheduleWeightedRoundRobin() {
         // 检查带宽限制
         uint32_t bandwidth_limit = 0;
         switch (priority) {
-            case DataPriority::FC_COMMAND: bandwidth_limit = config_.fc_bandwidth_kbps; break;
             case DataPriority::VOICE: bandwidth_limit = config_.voice_bandwidth_kbps; break;
             case DataPriority::VIDEO: bandwidth_limit = config_.video_bandwidth_kbps; break;
             case DataPriority::GRID_MAP: bandwidth_limit = config_.grid_map_bandwidth_kbps; break;
             case DataPriority::POINT_CLOUD: bandwidth_limit = config_.point_cloud_bandwidth_kbps; break;
+            default: break;
         }
         
         if (bandwidth_limit > 0 && stats_.current_bandwidth_kbps[idx] >= bandwidth_limit) {
@@ -186,41 +191,48 @@ size_t TransmissionScheduler::scheduleWeightedRoundRobin() {
             continue;
         }
         
-        // 尝试获取并发送任务
-        if (buffer_->pop(task)) {
+        // 从指定优先级队列获取任务
+        if (buffer_->pop(priority, task)) {
             if (sendTask(task)) {
-                scheduled++;
                 current_weight_[idx]--;
-                return scheduled;
+                return 1;
             }
         } else {
             current_weight_[idx] = 0;  // 无数据，重置权重
         }
     }
     
-    return scheduled;
+    return 0;
 }
 
 size_t TransmissionScheduler::scheduleBandwidthRatio() {
-    // 先检查总带宽限制
     if (isTotalBandwidthExceeded()) {
         return 0;
     }
     
-    // 计算总带宽使用比例，优先发送使用率低于配额的数据类型
+    SendTask task;
+    
+    // 第一步：FC 绝对优先
+    if (buffer_->pop(DataPriority::FC_COMMAND, task)) {
+        if (sendTask(task)) {
+            return 1;
+        }
+    }
+    
+    // 第二步：其他四个按带宽使用率最低优先
     double min_ratio = 2.0;
     int selected = -1;
     
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 1; i < 5; ++i) {  // 跳过 FC
         auto priority = static_cast<DataPriority>(i);
         
         uint32_t bandwidth_limit = 0;
         switch (priority) {
-            case DataPriority::FC_COMMAND: bandwidth_limit = config_.fc_bandwidth_kbps; break;
             case DataPriority::VOICE: bandwidth_limit = config_.voice_bandwidth_kbps; break;
             case DataPriority::VIDEO: bandwidth_limit = config_.video_bandwidth_kbps; break;
             case DataPriority::GRID_MAP: bandwidth_limit = config_.grid_map_bandwidth_kbps; break;
             case DataPriority::POINT_CLOUD: bandwidth_limit = config_.point_cloud_bandwidth_kbps; break;
+            default: break;
         }
         
         if (bandwidth_limit == 0) continue;
@@ -233,8 +245,8 @@ size_t TransmissionScheduler::scheduleBandwidthRatio() {
     }
     
     if (selected >= 0) {
-        SendTask task;
-        if (buffer_->pop(task)) {
+        auto priority = static_cast<DataPriority>(selected);
+        if (buffer_->pop(priority, task)) {
             if (sendTask(task)) {
                 return 1;
             }

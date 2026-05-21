@@ -326,6 +326,41 @@ bool SendBuffer::pop(SendTask& task) {
     return false;
 }
 
+bool SendBuffer::pop(DataPriority priority, SendTask& task) {
+    if (!initialized_) {
+        return false;
+    }
+    
+    auto queue = getQueue(priority);
+    auto bucket = getBucket(priority);
+    
+    if (!queue || !bucket) {
+        return false;
+    }
+    
+    if (queue->empty()) {
+        return false;
+    }
+    
+    // 带宽预留：先 peek 队首包大小，按比特数消费令牌
+    SendTask front_task;
+    if (!queue->peek(front_task)) {
+        return false;
+    }
+    double tokens_needed = front_task.data->size() * 8;  // 字节转比特
+    if (!bucket->tryConsume(tokens_needed)) {
+        return false;  // 令牌不足
+    }
+    
+    // 弹出任务
+    if (queue->pop(task)) {
+        total_popped_++;
+        return true;
+    }
+    
+    return false;
+}
+
 bool SendBuffer::popBlocking(SendTask& task, uint32_t timeout_ms) {
     if (!initialized_) {
         return false;

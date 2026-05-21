@@ -259,6 +259,14 @@ public:
     bool pop(SendTask& task);
     
     /**
+     * 从指定优先级队列弹出任务（仅检查该队列的令牌）
+     * @param priority 指定优先级
+     * @param task 输出任务
+     * @return true 成功，false 该队列为空或令牌不足
+     */
+    bool pop(DataPriority priority, SendTask& task);
+    
+    /**
      * 阻塞式弹出（等待直到有任务可用且令牌足够）
      * @param task 输出任务
      * @param timeout_ms 超时时间（毫秒，0表示无限等待）
