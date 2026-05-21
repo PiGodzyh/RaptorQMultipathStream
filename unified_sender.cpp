@@ -22,11 +22,22 @@ UnifiedSenderConfig::UnifiedSenderConfig() {
     scheduler_config.point_cloud_weight = 40;
     
     // 带宽限制
-    scheduler_config.fc_bandwidth_kbps = 100;
-    scheduler_config.voice_bandwidth_kbps = 500;
-    scheduler_config.video_bandwidth_kbps = 6000;
-    scheduler_config.grid_map_bandwidth_kbps = 2000;
-    scheduler_config.point_cloud_bandwidth_kbps = 1500;
+    scheduler_config.fc_bandwidth_kbps = 100;           // FC：固定预留，最高优先级
+    scheduler_config.voice_bandwidth_kbps = 500;        // Voice：参与动态调整
+    scheduler_config.video_bandwidth_kbps = 6000;       // Video：动态调整基准
+    scheduler_config.grid_map_bandwidth_kbps = 500;     // GridMap：实时性高但带宽小，可缓冲
+    scheduler_config.point_cloud_bandwidth_kbps = 1000; // PointCloud：实时性低，适当降低配额
+    
+    // 同步 SendBuffer TokenBucket 带宽预留配置（bps = kbps * 1000）
+    shaping_config.fc_rate_bps = scheduler_config.fc_bandwidth_kbps * 1000.0;
+    shaping_config.voice_rate_bps = scheduler_config.voice_bandwidth_kbps * 1000.0;
+    shaping_config.video_rate_bps = scheduler_config.video_bandwidth_kbps * 1000.0;
+    shaping_config.grid_rate_bps = scheduler_config.grid_map_bandwidth_kbps * 1000.0;
+    shaping_config.pc_rate_bps = scheduler_config.point_cloud_bandwidth_kbps * 1000.0;
+    
+    // 增大 burst_factor，确保单帧大数据（GridMap ~40KB）能通过 TokenBucket
+    // 原 0.05（50ms）太小，改为 1.0（1秒数据量）
+    shaping_config.burst_factor = 1.0;
 }
 
 UnifiedSender::UnifiedSender(const UnifiedSenderConfig& config)
@@ -81,8 +92,31 @@ bool UnifiedSender::initialize() {
     
     feedback_controller_.setRateCallback(
         [this](DataPriority priority, uint32_t rate) {
-            // 可以在这里调整 Token Bucket 速率
-            // send_buffer_.setShapingRate(priority, rate / 1000.0);  // kbps -> pps (approximate)
+            // FC 保持固定配额，不参与动态带宽调整
+            if (priority == DataPriority::FC_COMMAND) {
+                return;
+            }
+            
+            // 下限保护：不低于初始配额的 50%，防止 clean 网络下持续降速
+            uint32_t min_rate = 500;
+            switch (priority) {
+                case DataPriority::VOICE:
+                    min_rate = config_.scheduler_config.voice_bandwidth_kbps / 2;
+                    break;
+                case DataPriority::VIDEO: 
+                    min_rate = config_.scheduler_config.video_bandwidth_kbps / 2; 
+                    break;
+                case DataPriority::POINT_CLOUD: 
+                    min_rate = config_.scheduler_config.point_cloud_bandwidth_kbps / 2; 
+                    break;
+                case DataPriority::GRID_MAP: 
+                    min_rate = config_.scheduler_config.grid_map_bandwidth_kbps / 2; 
+                    break;
+                default: break;
+            }
+            
+            uint32_t effective_rate = std::max(rate, min_rate);
+            send_buffer_.setShapingRate(priority, effective_rate * 1000.0);
         });
     std::cout << "  FeedbackController initialized" << std::endl;
     

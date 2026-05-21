@@ -1,627 +1,445 @@
-# Sender & Receiver Demo
+# RaptorQ 多流传输系统
 
-基于 RaptorQ FEC 的可靠 UDP 数据传输系统。
+基于 RaptorQ FEC 的多传感器数据实时传输系统，支持无人机/机器人遥操作场景下视频、语音、飞控指令、激光点云、栅格地图五种数据类型的并发可靠传输。
 
 ## 功能特性
 
-- ✅ **RaptorQ FEC 编码**: 前向纠错，容忍丢包
-- ✅ **多线程架构**: 基于 libevent 的高性能事件循环
-- ✅ **异步处理**: 非阻塞发送和接收
-- ✅ **流管理**: 支持多数据流并发传输
-- ✅ **自动解码**: 收到足够符号后自动恢复数据
+- **RaptorQ FEC 前向纠错**：容忍丢包，支持差异化冗余策略（I帧 70%、视频 40%、语音 5%）
+- **严格优先级调度**：按实时性要求排序出队——飞控指令 > 栅格地图 > 视频 > 语音 > 激光点云
+- **应用层带宽预留**：Token Bucket bps 流量整形 + 接收端反馈闭环动态调整
+- **五种数据类型并发**：独立 UDP 端口，独立编码线程，互不干扰
+- **实时观看支持**：视频 HTTP MJPEG 流、点云 PCL Viewer 3D 显示
 
 ## 系统架构
 
 ```
-Sender (发送端)                     Receiver (接收端)
-┌─────────────────────┐            ┌─────────────────────┐
-│ 原始数据            │            │ UDP 接收            │
-│       ↓             │            │       ↓             │
-│ RaptorQ 编码        │            │ 符号提取            │
-│       ↓             │            │       ↓             │
-│ 生成符号            │   UDP      │ EventQueue         │
-│ (源 + 修复)         │ ────────→  │       ↓             │
-│       ↓             │            │ RaptorQ 解码        │
-│ UDP 发送            │            │       ↓             │
-│ (EventLoop)         │            │ 恢复数据            │
-└─────────────────────┘            └─────────────────────┘
+发送端                                              接收端
+┌─────────────────┐                                ┌─────────────────┐
+│ Video/FC/Voice  │                                │ 5x Receiver     │
+│ /PC/GridMap     │                                │ (端口9000-9004) │
+│     ↓           │                                │     ↓           │
+│ UnifiedSender   │      UDP (5个端口)             │ FeedbackSender  │
+│ ├── BlockPartition                               │     ↓           │
+│ ├── SendBuffer    │  ═══════════════════════►    │ RaptorQ 解码    │
+│ │   (优先级队列    │                             │     ↓           │
+│ │    + TokenBucket)│                            │ UnifiedReceiver │
+│ ├── Scheduler     │                             │     ↓           │
+│ ├── FeedbackController ◄═══════════════════════│ 回调专用接收器   │
+│ └── 5x Sender     │    反馈包(500ms周期)         │ (Video/FC/...)  │
+└─────────────────┘                                └─────────────────┘
 ```
+
+## 数据类型与端口分配
+
+| 数据类型 | 端口 | 实时性 | 可靠性 | 优先级 | 队列容量 | 带宽配额 | 动态调整 |
+|---------|------|--------|--------|--------|---------|---------|---------|
+| 飞控指令 | 9000 | 高 | 高 | 1st | 10 | 100kbps | ❌ 固定 |
+| 栅格地图 | 9003 | 高 | 高 | 2nd | 300 | 500kbps | ✅ |
+| 视频流 | 9001 | 中/高 | 中 | 3rd | 100 | 6000kbps | ✅ |
+| 语音 | 9004 | 中 | 低 | 4th | 50 | 500kbps | ✅ |
+| 激光点云 | 9002 | 低 | 中 | 5th | 500 | 1000kbps | ✅ |
 
 ## 编译
 
 ### 依赖
 
 ```bash
-# macOS
-brew install libevent
-
 # Ubuntu/Debian
-sudo apt-get install libevent-dev
+sudo apt-get install libevent-dev libavcodec-dev libavformat-dev libavutil-dev libpcl-dev
 
-# CentOS/RHEL
-sudo yum install libevent-devel
+# 子模块编译
+make -C libRaptorQ/build
+make -C pack/build
+make -C network/build
+make -C event_base/build
 ```
 
-### 编译所有程序
+### 编译主程序
 
 ```bash
-make all
+# 完整编译（修改头文件后必须 clean）
+make clean && make raptorq_demo
+
+# 只编译（未修改头文件时）
+make raptorq_demo
 ```
 
-### 仅编译发送端或接收端
+> ⚠️ **注意**：修改 `feedback.h`、`send_buffer.h` 等头文件后，`make` 不会自动重新编译所有依赖的 `.cpp`，**必须 `make clean`**。
+
+## 运行方法
+
+### 接收端
 
 ```bash
-make sender      # 仅编译发送端
-make receiver    # 仅编译接收端
+./build/raptorq_demo receiver
 ```
 
-## 使用方法
+- 监听端口 9000-9004
+- 自动创建输出目录 `output/`
+- 按 `Ctrl+C` 停止
 
-### 启动接收端
+### 发送端
 
 ```bash
-# 基本用法
-./build/receiver_demo 9000
-
-# 使用 8 个工作线程
-./build/receiver_demo 9000 -t 8
-
-# 指定输出目录
-./build/receiver_demo 9000 -o ./received_data
-
-# 详细模式
-./build/receiver_demo 9000 -v
-
-# 完整示例
-./build/receiver_demo 9000 -t 8 -o ./output -v
+./build/raptorq_demo sender <目标IP> <数据类型> [选项]
 ```
 
-**参数说明:**
-- `port`: 监听端口（必需）
-- `-t <count>`: 工作线程数（默认: 4）
-- `-o <dir>`: 输出目录（默认: 当前目录）
-- `-v`: 详细模式
+**数据类型**（逗号分隔）：`fc`, `voice`, `video`, `pointcloud`, `gridmap`, `all`
 
-### 启动发送端
+**选项**：
+- `--simulation`：使用模拟数据（默认使用真实文件）
+- `--bypass-fec`：绕过 RaptorQ FEC，直接发送原始数据
+- `--redundancy <ratio>`：设置 FEC 冗余度（0.0-1.0）
+- `--drop-rate <rate>`：模拟网络丢包率（0.0-1.0）
+
+**示例**：
 
 ```bash
-# 基本用法
-./build/sender_demo 127.0.0.1 9000
+# 发送全部 5 种真实数据
+./build/raptorq_demo sender 127.0.0.1 all
 
-# 发送 20 个数据包，间隔 500ms
-./build/sender_demo 127.0.0.1 9000 -n 20 -i 500
+# 只发送 FC + Video
+./build/raptorq_demo sender 127.0.0.1 fc,video
 
-# 使用 512 字节符号，20% 冗余
-./build/sender_demo 127.0.0.1 9000 -s 512 -r 0.2
+# 发送视频（无 FEC）
+./build/raptorq_demo sender 127.0.0.1 video --bypass-fec
 
-# 完整示例
-./build/sender_demo 127.0.0.1 9000 -n 50 -i 100 -s 256 -r 0.15
+# 50% 冗余度
+./build/raptorq_demo sender 127.0.0.1 video --redundancy 0.5
 ```
 
-**参数说明:**
-- `server_addr`: 目标地址（必需）
-- `server_port`: 目标端口（必需）
-- `-n <count>`: 发送数据包数量（默认: 10）
-- `-i <ms>`: 发送间隔毫秒（默认: 100）
-- `-s <size>`: 符号大小字节（默认: 256）
-- `-r <ratio>`: 修复符号比例 0.0-1.0（默认: 0.1）
-- `-t <threads>`: 编码线程数（默认: 4）
+**FC 交互式输入**：
 
-## 快速测试
+发送端启动 `fc` 类型后，会进入交互模式：
+```
+> TAKEOFF
+> MOVE 1.0 2.0 3.0
+> LAND
+> quit
+```
 
-### 方法1: 使用 make 命令
+优先级前缀：`!high <cmd>`, `!normal <cmd>`, `!low <cmd>`
+
+---
+
+### 视频实时观看（HTTP MJPEG 流）
+
+一键启动接收端 + HTTP 服务器 + 发送端，浏览器直接观看实时视频：
 
 ```bash
-# 终端1: 启动接收端
-make run-receiver
-
-# 终端2: 启动发送端
-make run-sender
+./start_live_view.sh [发送端IP] [视频文件名]
 ```
 
-### 方法2: 使用测试脚本
+**示例**：
 
 ```bash
-# 启动测试（会打开两个终端窗口）
-./test.sh
-```
-
-### 方法3: 手动测试
-
-```bash
-# 终端1
-./build/receiver_demo 9000 -t 4 -v
-
-# 终端2
-./build/sender_demo 127.0.0.1 9000 -n 10 -i 1000 -s 256 -r 0.1
-```
-
-## 测试场景
-
-### 场景1: 基本功能测试
-
-```bash
-# 接收端
-./build/receiver_demo 9000
-
-# 发送端
-./build/sender_demo 127.0.0.1 9000 -n 5 -i 2000
-```
-
-### 场景2: 高吞吐量测试
-
-```bash
-# 接收端（8个线程）
-./build/receiver_demo 9000 -t 8
-
-# 发送端（50个包，100ms间隔，512字节符号）
-./build/sender_demo 127.0.0.1 9000 -n 50 -i 100 -s 512
-```
-
-### 场景3: 高冗余测试（模拟高丢包率）
-
-```bash
-# 接收端
-./build/receiver_demo 9000 -v
-
-# 发送端（30% 冗余）
-./build/sender_demo 127.0.0.1 9000 -n 10 -r 0.3
-```
-
-## 输出示例
-
-### 发送端输出
-
-```
-========================================
-   Sender Demo (RaptorQ FEC)
-========================================
-目标地址: 127.0.0.1:9000
-发送数量: 10
-发送间隔: 1000 ms
-符号大小: 256 字节
-修复比例: 10%
-========================================
-
-开始发送数据...
-✓ 已放入队列 #0 (大小: 1950 字节, 队列: 1)
-Sender: 编码数据 1950 字节, 源符号: 8, 修复符号: 1
-Sender: 流 0 发送完成, 成功: 9/9, 失败: 0
-✓ 已放入队列 #1 (大小: 1950 字节, 队列: 0)
-...
-```
-
-### 接收端输出
-
-```
-========================================
-  Receiver Demo (RaptorQ FEC)
-========================================
-监听端口: 9000
-工作线程: 4
-========================================
-
-[线程 0] 流 0 接收符号 #0 (1/9)
-[线程 0] 流 0 接收符号 #1 (2/9)
-...
-[线程 0] 流 0 接收符号 #7 (8/9)
-[线程 0] 流 0 可以解码，开始解码...
-[线程 0] 流 0 解码成功！数据大小: 1950 字节
-
-========================================
-✓ 流 0 解码完成！
-  数据大小: 1950 字节
-  已保存到: ./received_stream_0000_msg_0.dat
-========================================
-```
-
-## 清理
-
-```bash
-# 清理编译文件
-make clean
-
-# 深度清理（包括子模块）
-make distclean
-```
-
-## 目录结构
-
-```
-├── Makefile                 # 主 Makefile
-├── README.md               # 本文件
-├── TODO.md                 # 待办事项
-├── data_common.h           # 数据类型公共定义
-├── sender.h/cpp            # 发送器实现
-├── sender_demo.cpp         # 发送端 demo
-├── receiver.h/cpp          # 接收器实现
-├── receiver_demo.cpp       # 接收端 demo
-├── video_transmitter.h/cpp # 视频传输发送器
-├── video_receiver.h/cpp    # 视频传输接收器
-├── voice_transmitter.h/cpp # 语音传输发送器
-├── voice_receiver.h/cpp    # 语音传输接收器
-├── voice_demo.cpp          # 语音传输演示
-├── fc_control.h/cpp        # 飞控指令模块
-├── point_cloud.h/cpp       # 点云传输模块
-├── grid_map.h/cpp          # 栅格地图模块
-├── multi_streaming_demo.cpp # 多数据流统一入口
-├── event_base/            # 事件循环模块
-│   ├── event_loop.h/cpp
-│   ├── event_queue.h
-│   └── Makefile
-├── network/               # 网络模块
-│   ├── network_server.h/cpp
-│   ├── network_client.h/cpp
-│   └── Makefile
-├── pack/                  # RaptorQ 封装
-│   ├── rq_pack.h/cpp
-│   └── Makefile
-├── VideoCodec/            # 视频编解码
-│   ├── video_reader.h/cpp
-│   └── video_writer.h/cpp
-├── VoiceCodec/            # 语音编解码
-│   └── voice_codec.h/cpp
-└── build/                 # 编译输出
-    ├── sender_demo        # 基础发送端
-    ├── receiver_demo      # 基础接收端
-    ├── video_streaming_demo  # 视频传输
-    ├── voice_demo         # 语音传输
-    └── multi_streaming_demo  # 多数据流
-```
-
-## 故障排查
-
-### 问题1: 找不到 libevent
-
-```bash
-# 检查是否安装
-brew list libevent  # macOS
-dpkg -l | grep libevent  # Ubuntu
-
-# 重新安装
-brew install libevent  # macOS
-```
-
-### 问题2: 链接错误
-
-```bash
-# 清理重新编译
-make distclean
-make all
-```
-
-### 问题3: 接收端无法收到数据
-
-- 检查防火墙设置
-- 确认端口未被占用: `lsof -i :9000`
-- 使用 `127.0.0.1` 进行本地测试
-
-## 性能优化建议
-
-1. **符号大小**: 较大的符号（512-1024字节）通常有更好的性能
-2. **线程数**: 根据 CPU 核心数调整（通常为核心数的 1-2 倍）
-3. **冗余比例**: 根据网络丢包率调整（10-30%）
-4. **发送间隔**: 避免网络拥塞，根据带宽调整
-
-## 视频传输功能
-
-基于 H.264 NAL 直通 + RaptorQ FEC 的实时视频流传输。
-
-### 特性
-
-- **H.264 NAL 直通**: 不编解码，直接传输 MP4 文件中的 H.264 数据，带宽效率高 (~2-5MB/s vs ~93MB/s)
-- **智能 FEC 策略**: I-帧 50% 冗余，P/B-帧 30% 冗余
-- **保序播放**: 接收端按帧序号顺序写入，支持乱序缓存和丢帧处理
-- **流ID分离**: 配置流(stream_id=0)与视频流(stream_id>=1)独立传输
-
-### 快速开始
-
-```bash
-# 1. 准备测试视频（生成 5 秒 1280x720 H.264 测试视频）
-ffmpeg -f lavfi -i testsrc=duration=5:size=1280x720:rate=30 -pix_fmt yuv420p input.mp4
-
-# 2. 终端1 - 启动接收端
-./build/video_streaming_demo receiver 9001 output.mp4
-
-# 3. 终端2 - 启动发送端
-./build/video_streaming_demo sender 127.0.0.1 9001 input.mp4
-
-# 4. 按 Ctrl+C 结束（接收端会自动关闭视频文件）
-
-# 5. 播放输出视频
-ffplay output.mp4
-```
-
-### 实时浏览器查看（推荐）
-
-使用一键启动脚本，自动启动接收端 + HTTP MJPEG 流服务器 + 发送端，浏览器直接观看：
-
-```bash
-# 一键启动（本地测试，默认使用 data/videos/test_gop1s.mp4）
+# 本地测试（默认视频 data/videos/test_gop1s.mp4）
 ./start_live_view.sh
 
-# 指定发送端 IP（如局域网另一台机器）
-./start_live_view.sh 192.168.1.100
-
-# 指定其他视频文件
-./start_live_view.sh 127.0.0.1 other_video.mp4
+# 指定视频文件
+./start_live_view.sh 127.0.0.1 test.mp4
 ```
 
-然后用浏览器打开输出的地址即可观看：
+然后用浏览器打开输出的地址：
 ```
-http://127.0.0.1:8080
-```
-
-**脚本内部流程：**
-```
-接收端(9001) → FIFO管道 → ffmpeg解码MJPEG → Python HTTP服务器(8080) → 浏览器
+http://<IP>:8080
 ```
 
-### 使用说明
-
-**接收端参数:**
+**数据流**：
 ```
-./build/video_streaming_demo receiver <port> <output.mp4>
-```
-- `port`: 监听端口（默认 9001）
-- `output.mp4`: 输出视频文件路径
-
-**发送端参数:**
-```
-./build/video_streaming_demo sender <server_addr> <port> <input.mp4>
-```
-- `server_addr`: 接收端地址
-- `port`: 接收端端口
-- `input.mp4`: 输入视频文件（H.264 编码）
-
-### 发送间隔参数
-
-在 `video_transmit_params.h` 中调整：
-
-```cpp
-struct FrameTransmitParams {
-    uint32_t send_interval_us = 10000;  // 10ms = 100fps 上限
-    // ...
-};
+接收端(9001) → /tmp/video_live.h264 FIFO → ffmpeg 解码 MJPEG
+                                                    ↓
+浏览器 ← HTTP multipart/x-mixed-replace ← Python HTTP 服务器(8080)
 ```
 
-### 接收统计
+> WSL2 环境下请使用脚本输出的 `http://<WSL-IP>:8080` 地址，Windows 浏览器通过 WSL 虚拟网卡访问。
 
-接收端会实时输出帧接收统计：
+**手动启动 HTTP 服务器（不通过脚本）**：
 
-```
-[接收统计] [FrameStats] 总计:150 成功:150 丢弃(满):0 丢弃(旧):0 缓存:0 (成功率:100%)
-```
-
-| 指标 | 说明 |
-|------|------|
-| 总计 | 收到的帧总数 |
-| 成功 | 成功写入视频的帧数 |
-| 丢弃(满) | 缓存满丢弃的帧 |
-| 丢弃(旧) | 过期的帧（已收到更新的帧） |
-| 缓存 | 等待顺序到达的帧数 |
-
-### 系统架构
-
-```
-发送端                                        接收端
-┌─────────────────┐                          ┌─────────────────┐
-│ VideoReader     │                          │ UDPServer       │
-│ 读取 H.264 NAL  │                          │ 接收 UDP 包     │
-│       ↓         │                          │       ↓         │
-│ 区分 I/P/B 帧   │      UDP 包              │ Receiver        │
-│       ↓         │  ═══════════════════►    │ RaptorQ 解码    │
-│ RaptorQ 编码    │                          │       ↓         │
-│ (I帧50%/PB30%)  │                          │ 按帧序排序      │
-│       ↓         │                          │       ↓         │
-│ UDPSender       │                          │ VideoWriter     │
-│ 发送符号        │                          │ 写入 MP4        │
-└─────────────────┘                          └─────────────────┘
-```
-
-### 关键技术点
-
-**1. H.264 NAL 直通**
-- 不解码视频，直接提取 MP4 中的 NAL 单元
-- SPS/PPS 作为配置流先行发送（stream_id=0）
-- 视频帧使用递增 stream_id（从1开始）
-
-**2. 差异化 FEC**
-- I-帧：符号大小 1024B，50% 冗余（容忍 33% 丢包）
-- P/B-帧：符号大小 1024B，30% 冗余（容忍 23% 丢包）
-
-**3. 保序交付**
-- 接收端维护 `next_expected_frame_seq` 计数器
-- 乱序帧缓存（最多 100 帧）
-- 过期帧自动丢弃
-
-## 语音传输功能
-
-基于 RaptorQ FEC 的语音文件传输，支持 WAV/PCM 格式音频文件。
-
-### 特性
-
-- **文件传输**: 从 WAV/PCM 文件读取音频，传输后保存为 WAV 文件
-- **实时发送**: 按 20ms 帧间隔发送（可调整速度）
-- **保序写入**: 接收端缓存乱序帧，按序写入文件
-- **低冗余**: 5% FEC 冗余，容忍轻度丢包
-
-### 端口和参数
-
-| 参数 | 值 |
-|------|-----|
-| 端口 | 9004 |
-| 采样率 | 8000 Hz |
-| 位深 | 16 bit |
-| 声道 | 单声道 |
-| 帧间隔 | 20 ms |
-| 符号大小 | 256 bytes |
-| FEC 冗余 | 5% |
-
-### 快速开始
+如果只想单独启动 HTTP 推流服务器，可使用标准库版本（无需额外依赖）：
 
 ```bash
-# 生成测试音频（10秒，1kHz正弦波）
-./build/generate_voice_test data/voice/test.wav 10
+python3 live_http_server.py
+```
 
-# 终端1 - 启动接收端
-./build/voice_demo receive 9004 output/voice/received.wav
+或 Flask 版本（需要 `.venv`）：
 
-# 终端2 - 启动发送端
-./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav
+```bash
+source .venv/bin/activate
+python3 video_http_server.py
+```
 
-# 传输完成后检查输出文件
-ls -la output/voice/
-file output/voice/received.wav
+两者都监听 `0.0.0.0:8080`，功能相同。`live_http_server.py` 纯标准库实现，不依赖第三方包；`video_http_server.py` 基于 Flask，代码更简洁。
+
+---
+
+## 网络模拟（tc netem）
+
+使用 `tc` 在 loopback 接口上模拟带宽限制和丢包：
+
+```bash
+# 设置 3mbit 带宽限制
+sudo tc qdisc add dev lo root netem rate 3mbit
+
+# 设置 3mbit + 20% 丢包
+sudo tc qdisc add dev lo root netem rate 3mbit loss 20%
+
+# 查看当前规则
+sudo tc qdisc show dev lo
+
+# 删除规则
+sudo tc qdisc del dev lo root
 ```
 
 ---
 
-## 多数据流传输（统一入口）
+## 测试脚本
 
-一个可执行文件管理五种数据类型的传输，端口分配如下：
+### 1. 带宽阶梯测试（推荐）
 
-| 数据类型 | 端口 | FEC策略 | 特性 |
-|---------|------|---------|------|
-| 飞控指令 | 9000 | 50%冗余，50ms超时 | 终端实时交互 |
-| 视频流 | 9001 | I帧50%/P帧30%冗余 | H.264 NAL直通 |
-| 点云 | 9002 | 10%冗余，1024B符号 | Livox CustomMsg格式 |
-| 栅格地图 | 9003 | 20%冗余，1024B符号 | Eigen::Vector3d格式 |
-| 语音 | 9004 | 5%冗余，256B符号 | 8kHz PCM实时传输 |
-
-### 使用方法
+自动跑 2mbit / 3mbit / 5mbit / 10mbit / clean 五组测试，输出 CSV 结果：
 
 ```bash
-./build/multi_streaming_demo <receiver|sender> <type> [参数...]
+chmod +x run_bw_ladder_test.sh
+./run_bw_ladder_test.sh
 ```
 
-**飞控指令（交互式）**
-```bash
-# 终端1 - 接收端
-./build/multi_streaming_demo receiver fc 9000
+**输出**：`data/bw_ladder_result.csv`
 
-# 终端2 - 发送端（实时输入）
-./build/multi_streaming_demo sender fc 127.0.0.1 9000
-# 输入指令如: TAKEOFF, LAND, MOVE 1.0 2.0 3.0
-# 优先级: !high TAKEOFF, !normal HOVER, !low STATUS
-```
+| 列 | 含义 |
+|---|---|
+| bandwidth | tc 限速值 |
+| fc_sent / fc_recv | FC 发送/接收数 |
+| fc_arrival_pct | FC 到达率 |
+| fc_delay_ms | FC 平均延迟 |
+| video_sent / video_recv | Video 发送/接收帧数 |
+| video_arrival_pct | Video 到达率 |
+| video_jitter_ms | Video 帧间隔抖动（标准差）|
+| video_pred_bw_kbps | Feedback 预测带宽 |
 
-**点云传输**
-```bash
-# 终端1 - 接收端
-./build/multi_streaming_demo receiver pointcloud 9002
-
-# 终端2 - 发送测试点云（1000点/帧，10帧）
-./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 test
-
-# 或发送PCD文件（从 data/pointcloud/ 读取）
-./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 room_5k.pcd
-```
-
-**栅格地图传输**
-```bash
-# 终端1 - 接收端
-./build/multi_streaming_demo receiver gridmap 9003
-
-# 终端2 - 发送测试地图（100x100单元格）
-./build/multi_streaming_demo sender gridmap 127.0.0.1 9003 test
-
-# 或发送文件（从 data/gridmap/ 读取）
-./build/multi_streaming_demo sender gridmap 127.0.0.1 9003 office_200x200.grid
-```
-
-**视频传输（使用统一入口）**
-```bash
-# 终端1 - 接收端
-./build/multi_streaming_demo receiver video 9001 output.mp4
-
-# 终端2 - 发送端（从 data/videos/ 读取）
-./build/multi_streaming_demo sender video 127.0.0.1 9001 input.mp4
-```
-
-**一键启动实时浏览器查看（推荐）**
-```bash
-# 启动接收端、HTTP服务器、发送端，浏览器访问 http://127.0.0.1:8080
-./start_live_view.sh
-
-# 自定义发送端 IP 和视频文件
-./start_live_view.sh 192.168.1.100 data/videos/test.mp4
-```
-
-**点云实时3D显示（PCL弹窗）**
-```bash
-# 接收端启动时会自动弹出PCL窗口，按高度着色实时显示（蓝色→红色）
-./build/multi_streaming_demo receiver pointcloud 9002
-
-# 发送测试点云
-./build/multi_streaming_demo sender pointcloud 127.0.0.1 9002 test
-```
-
-**语音传输（独立程序）**
-```bash
-# 终端1 - 接收端
-./build/voice_demo receive 9004 output/voice/received.wav
-
-# 终端2 - 发送端
-./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav
-
-# 或生成测试音频后传输
-./build/generate_voice_test data/voice/test.wav 5
-./build/voice_demo send 127.0.0.1 9004 data/voice/test.wav
-```
-
-### 目录结构
-
-```
-data/                      # 输入文件目录
-├── videos/
-├── fc/
-├── pointcloud/
-├── gridmap/
-└── voice/                 # 语音样例数据
-
-output/                    # 输出文件目录
-├── videos/
-├── fc/                    # 飞控指令日志
-├── pointcloud/            # 接收的点云PCD文件
-├── gridmap/               # 接收的栅格地图文件
-└── voice/                 # 接收的语音数据
-```
-
-### 生成样例数据
+### 2. 单带宽测试（3mbit）
 
 ```bash
-# 生成点云和栅格地图样例数据
-make gen-data
+chmod +x test_bw_prediction.sh
+./test_bw_prediction.sh
 ```
 
-生成的样例数据：
-- **点云**: `data/pointcloud/room_5k.pcd` (5000点，室内房间场景), `outdoor_10k.pcd` (10000点)
-- **栅格地图**: `data/gridmap/office_200x200.grid` (10x10米办公室), `warehouse_300x300.grid` (15x15米仓库)
-- **文本预览**: `data/gridmap/office_preview.txt` (ASCII艺术可视化)
+### 3. Clean 网络测试
 
-### 故障排查
-
-**视频无法播放**
 ```bash
-# 检查输出文件是否完整
-ffprobe output.mp4
-
-# 强制重新封装修复
-ffmpeg -i output.mp4 -c copy fixed.mp4
+chmod +x test_bw_prediction_clean.sh
+./test_bw_prediction_clean.sh
 ```
 
-**接收端收不到帧**
-- 确认端口未被占用：`lsof -i :9001`
-- 检查输入视频格式：`ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1 input.mp4`
-- 确保是 H.264 编码
+---
 
-**帧丢失过多**
-- 增加冗余比例（修改 `video_common.h` 中的 `repair_ratio`）
-- 降低发送速率（增大 `send_interval_us`）
-- 检查网络带宽
+## 日志文件
+
+| 文件 | 内容 |
+|------|------|
+| `logs/fc_tx.log` | FC 发送：`timestamp_us,seq,priority,command` |
+| `logs/video_tx.log` | Video 发送：`timestamp_us,frame_seq,frame_type,size` |
+| `logs/video_rx.log` | Video 接收：`timestamp_us,frame_seq,frame_type,size` |
+| `logs/sender.log` | Sender 完整日志（含 FeedbackController 调整记录） |
+| `output/fc/received.log` | FC 接收：`timestamp_us,seq,priority,delay_ms,command` |
+
+**分析命令**：
+
+```bash
+# FC 到达率
+wc -l logs/fc_tx.log output/fc/received.log
+
+# FC 平均延迟
+awk -F',' '{sum+=$4} END {if(NR>0) printf "%.2fms\n", sum/NR}' output/fc/received.log
+
+# Feedback 带宽调整记录
+grep "FeedbackController.*Adjusted Video" logs/sender.log
+
+# Video 帧间隔抖动
+awk -F',' 'NR>1{d=$1-prev;sum+=d;sq+=d*d;n++} {prev=$1} END{m=sum/n;printf "%.2fms\n",sqrt(sq/n-m*m)/1000}' logs/video_rx.log
+```
+
+---
+
+## 数据分析工具（Python）
+
+`local/` 目录下提供了专用分析脚本，避免手写 `awk`：
+
+### 1. FC 延迟与到达率统计
+
+```bash
+python3 local/calc_fc_delay.py
+```
+
+**输入**：`logs/fc_tx.log` + `output/fc/received.log`  
+**输出**：逐行延迟、到达率、P50/P95/P99 分位数
+
+```
+统计结果:
+  发送总数: 200
+  成功接收: 199
+  丢失:     1
+  到达率:   99.5%
+
+延迟统计:
+  平均: 1.659 ms
+  最小: 0.812 ms
+  最大: 3.421 ms
+  P50:  1.523 ms
+  P95:  2.891 ms
+  P99:  3.312 ms
+```
+
+### 2. Video 延迟与帧类型统计
+
+```bash
+python3 local/calc_video_delay.py
+```
+
+**输入**：`logs/video_tx.log` + `logs/video_rx.log`  
+**输出**：按 I/P/B 帧分别统计延迟
+
+```
+视频统计:
+  发送帧数: 150
+  成功接收: 148
+  丢失:     2
+  到达率:   98.7%
+
+延迟统计 (所有帧):
+  平均: 2.134 ms
+  P50:  1.987 ms
+
+  I帧 (15帧): 平均 1.823 ms
+  P帧 (133帧): 平均 2.201 ms
+```
+
+### 3. Feedback 自适应冗余度时间线
+
+```bash
+python3 local/analyze_feedback.py <receiver_log> <sender_log>
+```
+
+**示例**：
+```bash
+python3 local/analyze_feedback.py logs/receiver.log logs/sender.log
+```
+
+**输出**：
+```
+自适应冗余度变化时间线
+  [2026-04-24 14:30:15]: 冗余度 = 40.0%, 速率 = 6000 kbps
+  [2026-04-24 14:30:20]: 冗余度 = 40.0%, 速率 = 5700 kbps
+
+分阶段统计
+  发送帧数: 150
+  接收帧数: 148
+  整体成功率: 98.7%
+```
+
+---
+
+## 目录结构
+
+```
+├── build/                    # 编译输出
+│   └── raptorq_demo          # 主程序（统一入口）
+├── data/                     # 输入数据
+│   ├── videos/
+│   ├── voice/
+│   ├── pointcloud/
+│   ├── gridmap/
+│   └── fc/
+├── output/                   # 接收端输出
+│   ├── videos/
+│   ├── voice/
+│   ├── pointcloud/
+│   ├── gridmap/
+│   └── fc/
+├── logs/                     # 运行日志
+├── local/                    # 论文相关文档
+│   ├── thesis_content_guide.md
+│   ├── prompt_for_ai_writer.md
+│   └── 设计期望.png
+├── send_buffer.h/cpp         # 发送缓冲与 TokenBucket
+├── scheduler.h/cpp           # 调度器
+├── feedback.h/cpp            # 反馈闭环
+├── unified_sender.h/cpp      # 统一发送器
+├── unified_receiver.h/cpp    # 统一接收器
+├── block_partition.h/cpp     # 数据分块
+├── video_transmitter.cpp     # 视频发送
+├── video_receiver.cpp        # 视频接收
+├── fc_control.cpp            # 飞控指令
+├── point_cloud.cpp           # 点云
+├── grid_map.cpp              # 栅格地图
+├── voice_transmitter.cpp     # 语音发送
+├── voice_receiver.cpp        # 语音接收
+├── network/                  # UDP 网络模块
+├── event_base/               # 事件循环模块
+├── pack/                     # RaptorQ 封装
+├── libRaptorQ/               # RaptorQ 库
+└── VideoCodec/               # H.264 读写
+    └── VoiceCodec/           # PCM 编解码
+```
+
+---
+
+## 系统配置参数
+
+| 参数 | 数值 | 说明 |
+|-----|------|------|
+| Feedback 周期 | 500 ms | 接收端发送反馈包间隔 |
+| EWMA 平滑系数 α | 0.3 | 新测量值权重 30% |
+| 保守系数 | 0.95 | 建议速率打 95 折 |
+| 下限保护 | 50% | 不低于初始配额的 50% |
+| TokenBucket 突发因子 | 0.05 | 50ms 数据量 |
+| Scheduler 调度周期 | 100 μs | 每次调度间隔 |
+
+---
+
+## 故障排查
+
+### 编译错误：头文件修改后程序崩溃
+
+```bash
+# 必须 clean 后重新编译
+make clean && make raptorq_demo
+```
+
+### 接收端 Segmentation Fault
+
+检查 `receiver.o` 是否因头文件修改未重新编译：
+```bash
+ls -la build/receiver.o build/feedback.o
+# 若 receiver.o 时间早于 feedback.o，说明未重新编译
+make clean && make raptorq_demo
+```
+
+### 发送端报 "发送失败"
+
+- 检查接收端是否已启动
+- 检查 `tc` 规则是否过于严格：`sudo tc qdisc show dev lo`
+- 清理 `tc` 规则测试：`sudo tc qdisc del dev lo root`
+
+### 视频无法播放
+
+```bash
+# 检查输出文件
+ffprobe output/videos/received.mp4
+
+# 强制修复
+ffmpeg -i output/videos/received.mp4 -c copy fixed.mp4
+```
+
+### 端口被占用
+
+```bash
+lsof -i :9000
+kill -9 <PID>
+```
+
+---
 
 ## License
 
 MIT
-

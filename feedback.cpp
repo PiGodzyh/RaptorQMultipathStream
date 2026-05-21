@@ -95,6 +95,48 @@ void StreamStats::onSymbolReceived(uint32_t symbol_id, uint32_t delay_ms) {
     }
 }
 
+void StreamStats::onBytesReceived(size_t bytes) {
+    received_bytes_ += bytes;
+    
+    // 首次收到数据时初始化窗口
+    if (bandwidth_window_start_ == std::chrono::steady_clock::time_point()) {
+        std::lock_guard<std::mutex> lock(bandwidth_mutex_);
+        bandwidth_window_start_ = std::chrono::steady_clock::now();
+    }
+}
+
+uint32_t StreamStats::getEstimatedBandwidthKbps() const {
+    std::lock_guard<std::mutex> lock(bandwidth_mutex_);
+    
+    if (bandwidth_window_start_ == std::chrono::steady_clock::time_point()) {
+        return 0;
+    }
+    
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_sec = std::chrono::duration<double>(now - bandwidth_window_start_).count();
+    
+    if (elapsed_sec < 0.01) return 0;
+    
+    uint64_t bytes = received_bytes_.load();
+    double instant_kbps = (bytes * 8.0) / (elapsed_sec * 1000.0);
+    
+    // EWMA 平滑：新值权重 30%，历史值权重 70%
+    constexpr double alpha = 0.3;
+    if (smoothed_bandwidth_kbps_ == 0.0) {
+        smoothed_bandwidth_kbps_ = instant_kbps;
+    } else {
+        smoothed_bandwidth_kbps_ = alpha * instant_kbps + (1.0 - alpha) * smoothed_bandwidth_kbps_;
+    }
+    
+    return static_cast<uint32_t>(smoothed_bandwidth_kbps_);
+}
+
+void StreamStats::resetBandwidthWindow() {
+    std::lock_guard<std::mutex> lock(bandwidth_mutex_);
+    received_bytes_ = 0;
+    bandwidth_window_start_ = std::chrono::steady_clock::now();
+}
+
 // ========== AdaptiveFEC 实现 ==========
 
 AdaptiveFEC::AdaptiveFEC(const Config& config) : config_(config) {}
@@ -265,8 +307,20 @@ void FeedbackController::processLoop() {
             // 计算新的配置
             float new_redundancy = adaptive_fec_.calculateRedundancy(
                 current_redundancy, aggregated);
-            uint32_t new_rate = adaptive_fec_.calculateRate(
-                current_rate, aggregated);
+            uint32_t new_rate = current_rate;
+            
+            // 优先使用接收端建议的速率（基于实际测到的带宽）
+            if (aggregated.suggested_rate_kbps > 0) {
+                // 保守策略：使用建议速率的 95%，避免顶到瓶颈
+                new_rate = static_cast<uint32_t>(aggregated.suggested_rate_kbps * 0.95f);
+                // 保底：不低于当前值的一半
+                uint32_t min_rate = current_rate / 2;
+                if (new_rate < min_rate) {
+                    new_rate = min_rate;
+                }
+            } else {
+                new_rate = adaptive_fec_.calculateRate(current_rate, aggregated);
+            }
             
             // 应用调整
             if (new_redundancy != current_redundancy || new_rate != current_rate) {
@@ -357,7 +411,11 @@ void FeedbackController::printStatistics() const {
 
 // ========== FeedbackSender 实现 ==========
 
-FeedbackSender::FeedbackSender(const Config& config) : config_(config) {}
+FeedbackSender::FeedbackSender(const Config& config) : config_(config) {
+    for (int i = 0; i < 5; ++i) {
+        smoothed_kbps_[i].store(0.0);
+    }
+}
 
 FeedbackSender::~FeedbackSender() {
     stop();
@@ -399,8 +457,9 @@ void FeedbackSender::sendLoop() {
                 feedback_sent_++;
             }
             
-            // 发送反馈后重置阶段性统计快照
+            // 发送反馈后重置阶段性统计快照和带宽窗口
             pair.second->resetSnapshot();
+            pair.second->resetBandwidthWindow();
         }
     }
 }
@@ -425,11 +484,46 @@ FeedbackPacket FeedbackSender::buildFeedbackPacket(uint64_t stream_id) {
         
         // 计算建议值
         if (packet.loss_rate > 0.20f) {
-            packet.suggested_redundancy = 0.50f;  // 高丢包建议50%冗余
+            packet.suggested_redundancy = 0.50f;
         } else if (packet.loss_rate > 0.10f) {
-            packet.suggested_redundancy = 0.30f;  // 中丢包建议30%冗余
+            packet.suggested_redundancy = 0.30f;
         } else {
-            packet.suggested_redundancy = 0.10f;  // 低丢包建议10%冗余
+            packet.suggested_redundancy = 0.10f;
+        }
+        
+        // 计算建议速率：按优先级聚合所有 stream 的带宽 + EWMA 平滑
+        // 解决每帧一个 stream_id 导致的 per-stream 统计失真问题
+        uint64_t total_bytes = 0;
+        std::chrono::steady_clock::time_point earliest_start;
+        // sendLoop 已持有 stats_mutex_，安全遍历
+        for (const auto& pair : stream_stats_) {
+            if (pair.second->priority == stats->priority) {
+                total_bytes += pair.second->received_bytes_.load();
+                if (earliest_start == std::chrono::steady_clock::time_point() ||
+                    pair.second->bandwidth_window_start_ < earliest_start) {
+                    earliest_start = pair.second->bandwidth_window_start_;
+                }
+            }
+        }
+        
+        if (earliest_start != std::chrono::steady_clock::time_point()) {
+            auto now = std::chrono::steady_clock::now();
+            double elapsed_sec = std::chrono::duration<double>(now - earliest_start).count();
+            if (elapsed_sec >= 0.01) {
+                double instant_kbps = (total_bytes * 8.0) / (elapsed_sec * 1000.0);
+                
+                int idx = static_cast<int>(stats->priority);
+                double prev = smoothed_kbps_[idx].load();
+                double smoothed;
+                if (prev == 0.0) {
+                    smoothed = instant_kbps;
+                } else {
+                    smoothed = 0.3 * instant_kbps + 0.7 * prev;
+                }
+                smoothed_kbps_[idx].store(smoothed);
+                
+                packet.suggested_rate_kbps = static_cast<uint32_t>(smoothed);
+            }
         }
     }
     
@@ -459,7 +553,8 @@ void FeedbackSender::setSendCallback(SendCallback callback) {
 void FeedbackSender::reportSymbolReceived(uint64_t stream_id, 
                                           DataPriority priority,
                                           uint32_t symbol_id, 
-                                          uint64_t send_timestamp_ms) {
+                                          uint64_t send_timestamp_ms,
+                                          size_t bytes) {
     auto stats = getOrCreateStreamStats(stream_id, priority);
     if (!stats) return;
     
@@ -472,6 +567,9 @@ void FeedbackSender::reportSymbolReceived(uint64_t stream_id,
                         : 0;
     
     stats->onSymbolReceived(symbol_id, delay_ms);
+    if (bytes > 0) {
+        stats->onBytesReceived(bytes);
+    }
     symbols_reported_++;
 }
 

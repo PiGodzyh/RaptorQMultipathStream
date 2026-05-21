@@ -110,6 +110,16 @@ struct StreamStats {
     
     // 记录符号接收
     void onSymbolReceived(uint32_t symbol_id, uint32_t delay_ms);
+    
+    // 带宽估算（新增）
+    std::atomic<uint64_t> received_bytes_{0};
+    std::chrono::steady_clock::time_point bandwidth_window_start_;
+    mutable std::mutex bandwidth_mutex_;
+    mutable double smoothed_bandwidth_kbps_ = 0.0;  // EWMA 平滑值
+    
+    void onBytesReceived(size_t bytes);
+    uint32_t getEstimatedBandwidthKbps() const;
+    void resetBandwidthWindow();
 };
 
 /**
@@ -314,7 +324,8 @@ public:
      * @param send_timestamp_ms 发送时间戳（用于计算延迟）
      */
     void reportSymbolReceived(uint64_t stream_id, DataPriority priority,
-                              uint32_t symbol_id, uint64_t send_timestamp_ms);
+                              uint32_t symbol_id, uint64_t send_timestamp_ms,
+                              size_t bytes = 0);
     
     /**
      * 报告符号丢失（Receiver 检测到丢包）
@@ -344,6 +355,10 @@ public:
     Statistics getStatistics() const;
 
 private:
+private:
+    // 按优先级聚合的带宽平滑值（避免 per-stream 统计失真）
+    mutable std::atomic<double> smoothed_kbps_[5];
+    
     /**
      * 发送线程主循环
      */

@@ -171,7 +171,7 @@ void RunVoiceSenderReal(std::shared_ptr<UnifiedSender> sender) {
 
 void RunPointCloudSenderReal(std::shared_ptr<UnifiedSender> sender) {
     PointCloudTransmitter transmitter(sender);
-    transmitter.SendTestCloud(1000, 10);
+    transmitter.SendTestCloud(1000, 100);
 }
 
 void RunGridMapSenderReal(std::shared_ptr<UnifiedSender> sender) {

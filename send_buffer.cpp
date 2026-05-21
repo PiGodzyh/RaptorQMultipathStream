@@ -198,17 +198,19 @@ void SendBuffer::initialize(const QueueConfig& qconfig, const ShapingConfig& sco
     queues_[3] = std::make_unique<PriorityQueue>(DataPriority::POINT_CLOUD, qconfig.point_cloud_max);
     queues_[4] = std::make_unique<PriorityQueue>(DataPriority::GRID_MAP, qconfig.grid_map_max);
     
-    // 创建 Token Bucket
-    buckets_[0] = std::make_unique<TokenBucket>(sconfig.fc_rate_pps, 
-                                                sconfig.fc_rate_pps * sconfig.burst_factor);
-    buckets_[1] = std::make_unique<TokenBucket>(sconfig.voice_rate_pps, 
-                                                sconfig.voice_rate_pps * sconfig.burst_factor);
-    buckets_[2] = std::make_unique<TokenBucket>(sconfig.video_rate_pps, 
-                                                sconfig.video_rate_pps * sconfig.burst_factor);
-    buckets_[3] = std::make_unique<TokenBucket>(sconfig.pc_rate_pps, 
-                                                sconfig.pc_rate_pps * sconfig.burst_factor);
-    buckets_[4] = std::make_unique<TokenBucket>(sconfig.grid_rate_pps, 
-                                                sconfig.grid_rate_pps * sconfig.burst_factor);
+    // 创建 Token Bucket（带宽预留模式：使用 bps 按比特限流）
+    // 如果 bps 已配置则使用 bps，否则回退到 pps 保持兼容
+    double fc_rate = (sconfig.fc_rate_bps > 0) ? sconfig.fc_rate_bps : sconfig.fc_rate_pps;
+    double voice_rate = (sconfig.voice_rate_bps > 0) ? sconfig.voice_rate_bps : sconfig.voice_rate_pps;
+    double video_rate = (sconfig.video_rate_bps > 0) ? sconfig.video_rate_bps : sconfig.video_rate_pps;
+    double pc_rate = (sconfig.pc_rate_bps > 0) ? sconfig.pc_rate_bps : sconfig.pc_rate_pps;
+    double grid_rate = (sconfig.grid_rate_bps > 0) ? sconfig.grid_rate_bps : sconfig.grid_rate_pps;
+    
+    buckets_[0] = std::make_unique<TokenBucket>(fc_rate, fc_rate * sconfig.burst_factor);
+    buckets_[1] = std::make_unique<TokenBucket>(voice_rate, voice_rate * sconfig.burst_factor);
+    buckets_[2] = std::make_unique<TokenBucket>(video_rate, video_rate * sconfig.burst_factor);
+    buckets_[3] = std::make_unique<TokenBucket>(pc_rate, pc_rate * sconfig.burst_factor);
+    buckets_[4] = std::make_unique<TokenBucket>(grid_rate, grid_rate * sconfig.burst_factor);
     
     initialized_ = true;
     
@@ -286,9 +288,10 @@ bool SendBuffer::pop(SendTask& task) {
         return false;
     }
     
-    // 按优先级顺序检查（FC > Voice > Video > PointCloud > GridMap）
-    for (int i = 0; i < 5; ++i) {
-        auto priority = static_cast<DataPriority>(i);
+    // 按优先级顺序检查（FC > GridMap > Video > Voice > PointCloud）
+    int priority_order[] = {0, 4, 2, 1, 3};  // FC_COMMAND, GRID_MAP, VIDEO, VOICE, POINT_CLOUD
+    for (int idx : priority_order) {
+        auto priority = static_cast<DataPriority>(idx);
         auto queue = getQueue(priority);
         auto bucket = getBucket(priority);
         
@@ -300,8 +303,13 @@ bool SendBuffer::pop(SendTask& task) {
             continue;
         }
         
-        // 检查令牌
-        if (!bucket->tryConsume(1.0)) {
+        // 带宽预留：先 peek 队首包大小，按比特数消费令牌
+        SendTask front_task;
+        if (!queue->peek(front_task)) {
+            continue;
+        }
+        double tokens_needed = front_task.data->size() * 8;  // 字节转比特
+        if (!bucket->tryConsume(tokens_needed)) {
             continue;  // 令牌不足，尝试下一个优先级
         }
         
@@ -326,13 +334,23 @@ bool SendBuffer::popBlocking(SendTask& task, uint32_t timeout_ms) {
     std::unique_lock<std::mutex> lock(mutex_);
     
     auto predicate = [this]() {
-        // 检查是否有数据且令牌足够
+        // 检查是否有数据且令牌足够（按队首包大小计算所需令牌）
         for (int i = 0; i < 5; ++i) {
             auto priority = static_cast<DataPriority>(i);
             auto queue = getQueue(priority);
             auto bucket = getBucket(priority);
             
-            if (queue && bucket && !queue->empty() && bucket->getAvailableTokens() >= 1.0) {
+            if (!queue || !bucket || queue->empty()) {
+                continue;
+            }
+            
+            SendTask front_task;
+            if (!queue->peek(front_task)) {
+                continue;
+            }
+            
+            double tokens_needed = front_task.data->size() * 8;
+            if (bucket->getAvailableTokens() >= tokens_needed) {
                 return true;
             }
         }

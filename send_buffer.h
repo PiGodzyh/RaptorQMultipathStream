@@ -189,27 +189,35 @@ public:
         size_t fc_command_max;      // 飞控：小队列，快速响应
         size_t voice_max;           // 语音：中等队列
         size_t video_max;           // 视频：较大队列
-        size_t point_cloud_max;     // 点云：大队列（数据量大）
-        size_t grid_map_max;        // 栅格：较大队列
+        size_t point_cloud_max;     // 点云：最大队列（实时性低，可大量缓冲）
+        size_t grid_map_max;        // 栅格：大队列（可容忍延迟）
         
         QueueConfig()
             : fc_command_max(10)
             , voice_max(50)
             , video_max(100)
-            , point_cloud_max(200)
-            , grid_map_max(150) {}
+            , point_cloud_max(500)   // 实时性低，增大缓冲
+            , grid_map_max(300)      // 可容忍延迟，增大缓冲
+        {}
     };
     
     /**
      * 流量整形配置
      */
     struct ShapingConfig {
-        double fc_rate_pps;     // 飞控：1000 pkt/s
-        double voice_rate_pps;  // 语音：500 pkt/s
-        double video_rate_pps;  // 视频：10000 pkt/s
-        double pc_rate_pps;     // 点云：2000 pkt/s
-        double grid_rate_pps;   // 栅格：3000 pkt/s
+        double fc_rate_pps;     // 飞控：1000 pkt/s（兼容保留）
+        double voice_rate_pps;  // 语音：500 pkt/s（兼容保留）
+        double video_rate_pps;  // 视频：10000 pkt/s（兼容保留）
+        double pc_rate_pps;     // 点云：2000 pkt/s（兼容保留）
+        double grid_rate_pps;   // 栅格：3000 pkt/s（兼容保留）
         double burst_factor;    // 突发因子（桶容量 = 速率 * 因子）
+        
+        // 带宽预留：比特/秒（bps），由 Scheduler 配额同步
+        double fc_rate_bps;
+        double voice_rate_bps;
+        double video_rate_bps;
+        double pc_rate_bps;
+        double grid_rate_bps;
         
         ShapingConfig()
             : fc_rate_pps(1000.0)
@@ -217,7 +225,12 @@ public:
             , video_rate_pps(10000.0)
             , pc_rate_pps(2000.0)
             , grid_rate_pps(3000.0)
-            , burst_factor(1.5) {}
+            , burst_factor(0.05)   // 50ms 数据量，限制突发
+            , fc_rate_bps(0)
+            , voice_rate_bps(0)
+            , video_rate_bps(0)
+            , pc_rate_bps(0)
+            , grid_rate_bps(0) {}
     };
 
 public:

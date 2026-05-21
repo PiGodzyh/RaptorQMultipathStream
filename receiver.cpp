@@ -298,7 +298,7 @@ void Receiver::processPacket(uint32_t thread_id, std::shared_ptr<Network::Packet
     feedback_sender_.setExpectedSymbols(header.stream_id, priority_, header.total_symbols);
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    feedback_sender_.reportSymbolReceived(header.stream_id, priority_, header.symbol_id, now_ms);
+    feedback_sender_.reportSymbolReceived(header.stream_id, priority_, header.symbol_id, now_ms, packet->data.size());
     
     std::cout << "[线程 " << thread_id << "] 流 " << header.stream_id 
               << " 接收符号 #" << header.symbol_id 
