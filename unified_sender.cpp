@@ -277,7 +277,7 @@ std::shared_ptr<Sender> UnifiedSender::createSender(DataPriority priority) {
     
     switch (priority) {
         case DataPriority::FC_COMMAND:
-            symbol_size = 512;
+            symbol_size = 64;   // 小数据量下使用小 symbol_size，避免 libRaptorQ 最小 K=10 导致的填充浪费
             repair_ratio = 0.5f;
             break;
         case DataPriority::VOICE:
